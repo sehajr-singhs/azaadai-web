@@ -1,0 +1,61 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 0 0% 9%;
+    --card: 0 0% 100%;
+    --card-foreground: 0 0% 9%;
+    --primary: 0 0% 9%;
+    --primary-foreground: 0 0% 98%;
+    --secondary: 0 0% 96.5%;
+    --secondary-foreground: 0 0% 9%;
+    --muted: 0 0% 96.5%;
+    --muted-foreground: 0 0% 42%;
+    --accent: 0 0% 95%;
+    --accent-foreground: 0 0% 9%;
+    --border: 0 0% 90%;
+    --input: 0 0% 88%;
+    --ring: 225 100% 40%;
+    --link: 225 100% 40%;   /* bungaazaadi.com #0033cc */
+    --gold: 37 79% 42%;     /* bungaazaadi.com #bf7f17 */
+    --destructive: 0 72% 50%;
+    --radius: 0.625rem;
+  }
+  .dark {
+    --background: 0 0% 0%;
+    --foreground: 0 0% 90%;
+    --card: 0 0% 4%;
+    --card-foreground: 0 0% 90%;
+    --primary: 0 0% 96%;
+    --primary-foreground: 0 0% 7%;
+    --secondary: 0 0% 10%;
+    --secondary-foreground: 0 0% 92%;
+    --muted: 0 0% 10%;
+    --muted-foreground: 0 0% 60%;
+    --accent: 0 0% 12%;
+    --accent-foreground: 0 0% 96%;
+    --border: 0 0% 15%;
+    --input: 0 0% 18%;
+    --ring: 228 100% 64%;
+    --link: 228 100% 64%;   /* bungaazaadi.com dark #466cff */
+    --gold: 38 72% 55%;
+    --destructive: 0 63% 55%;
+  }
+  * { @apply border-border; }
+  html, body, #root { height: 100%; }
+  body { @apply bg-background text-foreground font-sans antialiased; font-feature-settings: "cv11", "ss01"; }
+  ::selection { background: hsl(var(--link) / 0.18); }
+}
+
+@layer components {
+  .answer { @apply prose prose-neutral dark:prose-invert max-w-none font-serif text-[1.075rem] leading-[1.7]; }
+  .answer h2, .answer h3 { @apply font-sans text-[0.95rem] font-semibold tracking-tight mt-6 mb-2; }
+  .answer a { @apply text-link no-underline hover:underline; }
+  .answer code { @apply font-mono text-[0.9em] before:content-none after:content-none bg-muted px-1 py-0.5 rounded; }
+  .answer blockquote { @apply border-l-gold/70 not-italic text-foreground/80; }
+  .cite { @apply inline-flex items-center justify-center align-super ml-0.5 h-[1.15rem] min-w-[1.15rem] px-1 rounded-full border border-link/30 bg-link/5 font-mono text-[0.65rem] leading-none text-link no-underline hover:bg-link hover:text-white transition-colors; }
+  .scroll-thin { scrollbar-width: thin; scrollbar-color: hsl(var(--border)) transparent; }
+}
