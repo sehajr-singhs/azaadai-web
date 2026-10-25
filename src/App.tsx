@@ -69,9 +69,15 @@ export default function App() {
   const [dark, setDark] = useState(() => document.documentElement.classList.contains("dark"));
   const abortRef = useRef<AbortController | null>(null);
 
-  useEffect(() => saveSettings(settings), [settings]);
-  useEffect(() => saveConversations(convs), [convs]);
-  useEffect(() => saveKeys(keys, settings.rememberKeys), [keys, settings.rememberKeys]);
+  useEffect(() => {
+    saveSettings(settings);
+  }, [settings]);
+  useEffect(() => {
+    saveConversations(convs);
+  }, [convs]);
+  useEffect(() => {
+    saveKeys(keys, settings.rememberKeys);
+  }, [keys, settings.rememberKeys]);
   useEffect(() => {
     document.documentElement.classList.toggle("dark", dark);
     try {
@@ -87,7 +93,9 @@ export default function App() {
       .then((lib) => setLib({ status: "ready", done: 1, total: 1, label: "", lib }))
       .catch((e) => setLib({ status: "error", done: 0, total: 0, label: "", error: String(e) }));
   }, []);
-  useEffect(() => reloadLibrary(), [reloadLibrary]);
+  useEffect(() => {
+    reloadLibrary();
+  }, [reloadLibrary]);
 
   const index = useMemo(() => (lib.lib ? new Index(lib.lib) : null), [lib.lib]);
   const active = convs.find((c) => c.id === activeId) ?? null;
@@ -148,6 +156,12 @@ export default function App() {
         messages: history.slice(-12).map((m) => ({ role: m.role, content: m.content })),
         signal: ctrl.signal,
         onStatus: setStatus,
+        onUpstream: (name) =>
+          patchActive(id, (c) => {
+            const m = [...c.messages];
+            m[m.length - 1] = { ...m[m.length - 1], model: `azaad-1 · ${name}` };
+            return { ...c, messages: m };
+          }),
         onToken: (t) => {
           if (acc === "") setStatus("");
           acc += t;
@@ -409,7 +423,9 @@ function TopBar(p: { settings: Settings; setSettings: (s: Settings) => void; mod
 function Thread(p: { conv: Conversation | null; busy: boolean; status: string; lib: LibState; onAsk: (q: string) => void }) {
   const end = useRef<HTMLDivElement>(null);
   const last = p.conv?.messages.at(-1)?.content.length;
-  useEffect(() => end.current?.scrollIntoView({ block: "end" }), [p.conv?.id, p.conv?.messages.length, last]);
+  useEffect(() => {
+    end.current?.scrollIntoView({ block: "end" });
+  }, [p.conv?.id, p.conv?.messages.length, last]);
 
   if (!p.conv || p.conv.messages.length === 0) return <Hero lib={p.lib} onAsk={p.onAsk} />;
   return (
@@ -920,7 +936,7 @@ function AboutDialog({ open, onClose }: { open: boolean; onClose: () => void }) 
       <div className="space-y-4 text-sm leading-relaxed">
         <div className="grid gap-2">
           {[
-            [Cloud, "Azaad-1 Cloud", "Qwen3.5-9B on a serverless GPU (Modal) with the whole library indexed server-side. Free to use, no key. Scales to zero, so the first message after a quiet spell takes about a minute."],
+            [Cloud, "Azaad-1 Cloud", "A grounded gateway on Modal: the Azaad persona and the whole library, indexed server-side, in front of NVIDIA Nemotron 3 Ultra (550B) with failover to Nemotron 3 Super. It can also run our own Qwen3.5-9B on a dedicated GPU. Free, no key."],
             [Cpu, "Azaad-1 On-device", "The same Azaad persona and retrieval with Qwen3.5 running in your browser on WebGPU. Nothing leaves your machine."],
             [KeyRound, "Bring your own key", "Claude, GPT, Gemini, Groq, OpenRouter, Ollama or any OpenAI-compatible server. Requests go from your browser straight to that provider."],
           ].map(([Icon, t, d]) => {

@@ -8,7 +8,7 @@ AI counsel grounded in the Azadist Manifesto and the Bunga Azaadi Vichaar Reposi
 
 | Mode | Where it runs | Key | Notes |
 | --- | --- | --- | --- |
-| **Azaad-1 Cloud** | Qwen3.5-9B on a Modal L4 GPU (vLLM, FP8, multi-token prediction) | none | Library indexed server-side. Scales to zero, so the first message after idle takes about a minute. |
+| **Azaad-1 Cloud** | Gateway on Modal (persona + library, retrieval server-side) in front of NVIDIA Nemotron 3 Ultra 550B, failing over to Nemotron 3 Super 120B, optional keyed providers, and optionally our own Qwen3.5-9B on an L4 GPU (vLLM, FP8, MTP) | none | Each answer reports which upstream served it. A cold start takes about 30s. |
 | **Azaad-1 On-device** | Qwen3.5 2B/4B/9B in the browser via WebLLM + WebGPU | none | Fully private. One-time model download, then offline. |
 | **Bring your own key** | Anthropic, OpenAI, Gemini, Groq, OpenRouter, Ollama, any OpenAI-compatible server | yours | The browser calls the provider directly. The key is stored only in your browser. |
 
@@ -29,7 +29,9 @@ curl -N $AZAAD_CLOUD_URL/v1/chat/completions \
   -d '{"model":"azaad-1","stream":true,"messages":[{"role":"user","content":"What is Khalsa Raaj?"}]}'
 ```
 
-The stream's first chunk carries `azaad_sources` (the passages used). Add `"council": true` for council mode. Also available: `GET /health`, `GET /v1/models` and `GET /v1/library/search?q=...`. The limit is 30 messages per 10 minutes per IP, on one GPU at most.
+The stream's first chunk carries `azaad_upstream` (which backend answered) and `azaad_sources` (the passages used). Add `"council": true` for council mode. Also available: `GET /health`, `GET /v1/models` and `GET /v1/library/search?q=...`. The limit is 30 messages per 10 minutes per IP.
+
+Upstream order lives in `upstreams()` in `server/azaad1.py`. To add keyed fallbacks, put `NVIDIA_API_KEY`, `GROQ_API_KEY` or `OPENROUTER_API_KEY` in the `azaad-upstreams` Modal secret. To put our own GPU model first, run `AZAAD_GPU=1 modal deploy server/azaad1.py` (needs a payment method on the Modal workspace).
 
 ## Develop
 
@@ -39,7 +41,7 @@ npm run dev                                   # http://localhost:5173/azaadai-we
 VITE_AZAAD_CLOUD_URL=https://... npm run build
 ```
 
-Deploy the model with `modal deploy server/azaad1.py`, then set the printed URL as the repo variable `AZAAD_CLOUD_URL` (Settings → Variables). Every push to `main` rebuilds the Pages site.
+Deploy the gateway with `modal deploy server/azaad1.py`, then set the printed URL as the repo variable `AZAAD_CLOUD_URL` (Settings → Variables). Every push to `main` rebuilds the Pages site.
 
 ## Credit
 

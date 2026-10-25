@@ -1,17 +1,23 @@
 """Azaad-1: the AzaadAI cloud model on Modal.
 
-Qwen3.5-9B served by vLLM (FP8 weights, text-only, multi-token prediction for
-speed) behind a small OpenAI-compatible gateway that builds the Bunga Azaadi
-library at boot and grounds every request in it.
+Azaad-1 is the Azaad persona plus the Bunga Azaadi library (indexed at boot,
+retrieved per request) in front of a chain of inference upstreams. The gateway
+tries each in order and fails over before the first token:
 
-    modal deploy server/azaad1.py
+  1. our own Qwen3.5-9B on a Modal GPU (vLLM, FP8, MTP), when deployed with
+     AZAAD_GPU=1 (needs a payment method on the Modal workspace)
+  2. NVIDIA Nemotron 3 Ultra 550B, via Kilo Gateway's free tier
+  3. NVIDIA Nemotron 3 Super 120B, via Kilo Gateway's free tier
+  4. any keyed providers in the optional `azaad-upstreams` Modal secret
+     (OPENROUTER_API_KEY, GROQ_API_KEY, NVIDIA_API_KEY)
+
+    modal deploy server/azaad1.py                       # gateway only (CPU)
+    AZAAD_GPU=1 modal deploy server/azaad1.py           # plus our own GPU model
 
 Clients that already attach library excerpts (the AzaadAI site does) are passed
 straight through. Plain API callers get server-side retrieval, so
 `{"model": "azaad-1", "messages": [...]}` is grounded with no extra work.
 """
-
-from __future__ import annotations
 
 import json
 import math
@@ -27,22 +33,33 @@ import modal
 
 BASE_MODEL = "Qwen/Qwen3.5-9B"
 SERVED_NAME = "azaad-1"
-VLLM_PORT = 8001
 MAX_LEN = 32768
 PROMPTS = Path(__file__).resolve().parent.parent / "prompts"
 
-image = (
+USE_GPU = os.environ.get("AZAAD_GPU") == "1"
+
+gateway_image = (
+    modal.Image.debian_slim(python_version="3.12")
+    .uv_pip_install("fastapi[standard]", "httpx", "pypdf")
+    .add_local_dir(str(PROMPTS), "/prompts")
+)
+gpu_image = (
     modal.Image.from_registry("nvidia/cuda:12.8.1-devel-ubuntu22.04", add_python="3.12")
     .entrypoint([])
-    .uv_pip_install("vllm==0.32.0", "huggingface_hub[hf_transfer]", "fastapi", "httpx", "pypdf")
-    .env({"HF_HUB_ENABLE_HF_TRANSFER": "1", "VLLM_USE_V1": "1"})
-    .add_local_dir(str(PROMPTS), "/prompts")
+    .uv_pip_install("vllm==0.32.0", "huggingface_hub[hf_transfer]", "fastapi[standard]", "httpx")
+    .env({"HF_HUB_ENABLE_HF_TRANSFER": "1"})
 )
 
 hf_cache = modal.Volume.from_name("azaad1-hf-cache", create_if_missing=True)
+library_cache = modal.Volume.from_name("azaad1-library", create_if_missing=True)
+LIBRARY_FILE = Path("/library/library.json")
 vllm_cache = modal.Volume.from_name("azaad1-vllm-cache", create_if_missing=True)
+upstream_secret = modal.Secret.from_name("azaad-upstreams")
 
 app = modal.App("azaad-1")
+
+KILO = "https://api.kilo.ai/api/gateway/v1"
+GPU_URL = "https://sehajr-singhs--azaad-1-qwen.modal.run/v1"
 
 ALLOWED_ORIGINS = [
     "https://sehajr-singhs.github.io",
@@ -158,21 +175,47 @@ class Library:
         self.df: Counter = Counter()
         self.avg = 1.0
 
-    def load(self):
+    def load(self, cache: Path | None = None, max_age: float = 24 * 3600):
+        """Build the index, reusing a cached copy of the raw texts when fresh."""
+        if cache and cache.exists() and time.time() - cache.stat().st_mtime < max_age:
+            for d in json.loads(cache.read_text(encoding="utf-8")):
+                self._add(d["path"], d["title"], d["url"], d["text"])
+            self.avg = sum(sum(c.values()) for c in self.tf) / max(1, len(self.tf))
+            print(f"library (cached): {len(self.docs)} docs, {len(self.chunks)} chunks")
+            return False
+        self._raw: list[dict] = []
+        self._fetch()
+        if cache:
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            cache.write_text(json.dumps(self._raw), encoding="utf-8")
+        return True
+
+    def _fetch(self):
+        from concurrent.futures import ThreadPoolExecutor
+
         import httpx
         from pypdf import PdfReader
 
         with httpx.Client(timeout=60, follow_redirects=True) as http:
             index = http.get(f"{HOST}/cache/{SITE_UID}").json()
             vocab: Counter = Counter({"dyp": 50})
-            for path in [p for p in index if p.endswith(".md")]:
+            paths = [p for p in index if p.endswith(".md")]
+
+            def get(path):
                 try:
                     r = http.get(f"{HOST}/access/{SITE_UID}/{urllib.parse.quote(path)}")
                     r.raise_for_status()
+                    return path, r.text
                 except Exception as exc:  # noqa: BLE001
                     print("skip", path, exc)
+                    return path, None
+
+            with ThreadPoolExecutor(16) as pool:
+                fetched = list(pool.map(get, paths))
+            for path, raw in fetched:
+                if raw is None:
                     continue
-                text = clean_markdown(r.text)
+                text = clean_markdown(raw)
                 if len(text) < 120:
                     continue
                 vocab.update(re.findall(r"[a-z']{2,}", text.lower()))
@@ -196,6 +239,8 @@ class Library:
         print(f"library: {len(self.docs)} docs, {len(self.chunks)} chunks")
 
     def _add(self, path: str, title: str, url: str, text: str):
+        if hasattr(self, "_raw"):
+            self._raw.append({"path": path, "title": title, "url": url, "text": text})
         d = len(self.docs)
         self.docs.append({"path": path, "title": title, "url": url, "core": any(re.search(c, path) for c in CORE)})
         for heading, body in chunk_doc(text, title):
@@ -249,59 +294,45 @@ class Library:
 
 
 # ---------------------------------------------------------------------------
-# Service
+# Upstreams
 # ---------------------------------------------------------------------------
 
 
-@app.cls(
-    image=image,
-    gpu="L4",
-    volumes={"/root/.cache/huggingface": hf_cache, "/root/.cache/vllm": vllm_cache},
-    scaledown_window=300,
-    timeout=600,
-    max_containers=1,  # caps spend: one GPU, no matter the traffic
-    min_containers=0,
-)
-@modal.concurrent(max_inputs=24)
-class Azaad1:
+def upstreams() -> list[dict]:
+    """Inference backends in failover order."""
+    out = []
+    if USE_GPU:
+        out.append({"name": "Qwen3.5-9B (Azaad GPU)", "base": GPU_URL, "model": SERVED_NAME, "key": None,
+                    "extra": {"chat_template_kwargs": {"enable_thinking": False}, "top_p": 0.8, "top_k": 20, "presence_penalty": 1.0}})
+    out += [
+        {"name": "Nemotron 3 Ultra 550B", "base": KILO, "model": "nvidia/nemotron-3-ultra-550b-a55b:free", "key": None, "extra": {"reasoning": {"enabled": False}}},
+        {"name": "Nemotron 3 Super 120B", "base": KILO, "model": "nvidia/nemotron-3-super-120b-a12b:free", "key": None, "extra": {"reasoning": {"enabled": False}}},
+    ]
+    if os.environ.get("NVIDIA_API_KEY"):
+        out.append({"name": "NVIDIA NIM", "base": "https://integrate.api.nvidia.com/v1", "model": os.environ.get("NVIDIA_MODEL", "nvidia/nemotron-3-super-120b-a12b"), "key": os.environ["NVIDIA_API_KEY"], "extra": {}})
+    if os.environ.get("GROQ_API_KEY"):
+        out.append({"name": "Groq", "base": "https://api.groq.com/openai/v1", "model": os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b"), "key": os.environ["GROQ_API_KEY"], "extra": {}})
+    if os.environ.get("OPENROUTER_API_KEY"):
+        out.append({"name": "OpenRouter", "base": "https://openrouter.ai/api/v1", "model": os.environ.get("OPENROUTER_MODEL", "openrouter/free"), "key": os.environ["OPENROUTER_API_KEY"], "extra": {}})
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Gateway (CPU, cheap, always available)
+# ---------------------------------------------------------------------------
+
+
+@app.cls(image=gateway_image, secrets=[upstream_secret], volumes={"/library": library_cache}, cpu=1.0, memory=1024, scaledown_window=900, timeout=600, max_containers=2)
+@modal.concurrent(max_inputs=64)
+class Gateway:
     @modal.enter()
     def start(self):
         self.persona = Path("/prompts/azaad.md").read_text(encoding="utf-8")
         self.council = Path("/prompts/council.md").read_text(encoding="utf-8")
-        cmd = [
-            "vllm", "serve", BASE_MODEL,
-            "--served-model-name", SERVED_NAME,
-            "--host", "127.0.0.1", "--port", str(VLLM_PORT),
-            "--quantization", "fp8",
-            "--language-model-only",
-            "--max-model-len", str(MAX_LEN),
-            "--gpu-memory-utilization", "0.92",
-            "--enable-prefix-caching",
-            "--reasoning-parser", "qwen3",
-            "--speculative-config", json.dumps({"method": "qwen3_next_mtp", "num_speculative_tokens": 2}),
-        ]
-        self.proc = subprocess.Popen(cmd)
         self.library = Library()
-        self.library.load()  # overlaps with vLLM boot
-        import httpx
-
-        deadline = time.time() + 540
-        while time.time() < deadline:
-            if self.proc.poll() is not None:
-                raise RuntimeError("vLLM exited during startup")
-            try:
-                if httpx.get(f"http://127.0.0.1:{VLLM_PORT}/health", timeout=2).status_code == 200:
-                    break
-            except Exception:  # noqa: BLE001
-                pass
-            time.sleep(2)
-        hf_cache.commit()
-        vllm_cache.commit()
+        if self.library.load(cache=LIBRARY_FILE):
+            library_cache.commit()
         self.hits: dict[str, list[float]] = defaultdict(list)
-
-    @modal.exit()
-    def stop(self):
-        self.proc.terminate()
 
     def _rate_ok(self, ip: str, limit: int = 30, window: float = 600) -> bool:
         now = time.time()
@@ -317,7 +348,7 @@ class Azaad1:
         from fastapi.middleware.cors import CORSMiddleware
         from fastapi.responses import JSONResponse, StreamingResponse
 
-        api = FastAPI(title="Azaad-1", version="1.0")
+        api = FastAPI(title="Azaad-1", version="1.1")
         api.add_middleware(
             CORSMiddleware,
             allow_origins=ALLOWED_ORIGINS,
@@ -325,11 +356,11 @@ class Azaad1:
             allow_methods=["GET", "POST", "OPTIONS"],
             allow_headers=["*"],
         )
-        client = httpx.AsyncClient(base_url=f"http://127.0.0.1:{VLLM_PORT}", timeout=httpx.Timeout(300, connect=10))
+        client = httpx.AsyncClient(timeout=httpx.Timeout(300, connect=15))
 
         @api.get("/health")
         async def health():
-            return {"status": "ok", "model": SERVED_NAME, "base": BASE_MODEL, "docs": len(self.library.docs), "chunks": len(self.library.chunks)}
+            return {"status": "ok", "model": SERVED_NAME, "upstreams": [u["name"] for u in upstreams()], "docs": len(self.library.docs), "chunks": len(self.library.chunks)}
 
         @api.get("/v1/models")
         async def models():
@@ -356,41 +387,113 @@ class Azaad1:
             if "LIBRARY EXCERPTS" not in system:
                 # Plain API caller: ground the request ourselves.
                 users = [m["content"] for m in convo if m["role"] == "user"]
-                council = bool(body.get("council")) or "--council" in users[-1]
+                council = self.council + "\n\n" if body.get("council") else ""
                 excerpts, sources = self.library.excerpts(self.library.search(" ".join(users[-2:] + users[-1:])))
-                system = f"{self.persona}\n\n{self.council + chr(10) * 2 if council else ''}## LIBRARY EXCERPTS\n\n{excerpts}" + (f"\n\n{system}" if system else "")
+                system = f"{self.persona}\n\n{council}## LIBRARY EXCERPTS\n\n{excerpts}" + (f"\n\n{system}" if system else "")
 
-            payload = {
-                "model": SERVED_NAME,
+            base_payload = {
                 "messages": [{"role": "system", "content": system}, *convo],
-                "stream": bool(body.get("stream", True)),
                 "max_tokens": min(int(body.get("max_tokens") or 2048), 4096),
                 "temperature": body.get("temperature", 0.7),
-                "top_p": 0.8,
-                "top_k": 20,
-                "presence_penalty": 1.0,
-                "chat_template_kwargs": {"enable_thinking": False},
             }
-            if not payload["stream"]:
-                r = await client.post("/v1/chat/completions", json=payload)
-                data = r.json()
+
+            async def open_upstream():
+                """First backend that answers 200 wins; failover happens before any token is sent."""
+                errors = []
+                for u in upstreams():
+                    headers = {"content-type": "application/json"}
+                    if u["key"]:
+                        headers["authorization"] = f"Bearer {u['key']}"
+                    payload = {**base_payload, **u["extra"], "model": u["model"], "stream": True}
+                    read = 180 if "GPU" in u["name"] else 60
+                    req = client.build_request("POST", f"{u['base']}/chat/completions", json=payload, headers=headers, timeout=httpx.Timeout(300, connect=15, read=read))
+                    try:
+                        r = await client.send(req, stream=True)
+                    except Exception as exc:  # noqa: BLE001
+                        errors.append(f"{u['name']}: {exc.__class__.__name__}")
+                        continue
+                    if r.status_code == 200:
+                        return u, r
+                    errors.append(f"{u['name']}: {r.status_code}")
+                    await r.aclose()
+                raise RuntimeError("; ".join(errors) or "no upstreams")
+
+            async def events():
+                """Normalized chunks from the chosen upstream, reasoning stripped."""
+                u, r = await open_upstream()
+                meta = {"azaad_upstream": u["name"]}
                 if sources:
-                    data["azaad_sources"] = sources
-                return JSONResponse(data, r.status_code)
+                    meta["azaad_sources"] = sources
+                yield {"object": "chat.completion.chunk", "model": SERVED_NAME, "choices": [], **meta}
+                try:
+                    async for line in r.aiter_lines():
+                        if not line.startswith("data:"):
+                            continue
+                        data = line[5:].strip()
+                        if data == "[DONE]":
+                            break
+                        try:
+                            ev = json.loads(data)
+                        except ValueError:
+                            continue
+                        for ch in ev.get("choices") or []:
+                            for k in ("reasoning", "reasoning_content", "reasoning_details"):
+                                (ch.get("delta") or {}).pop(k, None)
+                        ev["model"] = SERVED_NAME
+                        yield ev
+                finally:
+                    await r.aclose()
+
+            if not body.get("stream", True):
+                text, meta = "", {}
+                try:
+                    async for ev in events():
+                        meta.update({k: v for k, v in ev.items() if k.startswith("azaad_")})
+                        for ch in ev.get("choices") or []:
+                            text += (ch.get("delta") or {}).get("content") or ""
+                except RuntimeError as exc:
+                    return JSONResponse({"error": {"message": f"All upstreams failed: {exc}"}}, 502)
+                return {"object": "chat.completion", "model": SERVED_NAME, "choices": [{"index": 0, "message": {"role": "assistant", "content": text}, "finish_reason": "stop"}], **meta}
 
             async def stream():
-                if sources:
-                    yield f"data: {json.dumps({'object': 'chat.completion.chunk', 'choices': [], 'azaad_sources': sources})}\n\n"
-                async with client.stream("POST", "/v1/chat/completions", json=payload) as r:
-                    if r.status_code != 200:
-                        err = (await r.aread()).decode(errors="replace")[:500]
-                        yield f"data: {json.dumps({'error': {'message': f'Model error {r.status_code}: {err}'}})}\n\n"
-                        yield "data: [DONE]\n\n"
-                        return
-                    async for line in r.aiter_lines():
-                        if line:
-                            yield line + "\n\n"
+                try:
+                    async for ev in events():
+                        yield f"data: {json.dumps(ev)}\n\n"
+                except RuntimeError as exc:
+                    yield f"data: {json.dumps({'error': {'message': f'All upstreams failed: {exc}'}})}\n\n"
+                yield "data: [DONE]\n\n"
 
             return StreamingResponse(stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
         return api
+
+
+# ---------------------------------------------------------------------------
+# Optional: our own GPU model (deploy with AZAAD_GPU=1)
+# ---------------------------------------------------------------------------
+
+if USE_GPU:
+
+    @app.function(
+        image=gpu_image,
+        gpu="L4",
+        volumes={"/root/.cache/huggingface": hf_cache, "/root/.cache/vllm": vllm_cache},
+        scaledown_window=300,
+        timeout=900,
+        max_containers=1,  # caps spend: one GPU no matter the traffic
+    )
+    @modal.concurrent(max_inputs=24)
+    @modal.web_server(port=8000, startup_timeout=600)
+    def qwen():
+        subprocess.Popen([
+            "vllm", "serve", BASE_MODEL,
+            "--served-model-name", SERVED_NAME,
+            "--host", "0.0.0.0", "--port", "8000",
+            "--quantization", "fp8",
+            "--language-model-only",
+            "--max-model-len", str(MAX_LEN),
+            "--gpu-memory-utilization", "0.92",
+            "--enable-prefix-caching",
+            "--reasoning-parser", "qwen3",
+            "--speculative-config", json.dumps({"method": "qwen3_next_mtp", "num_speculative_tokens": 2}),
+        ])

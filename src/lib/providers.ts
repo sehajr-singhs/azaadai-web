@@ -32,7 +32,7 @@ export const PROVIDERS: ProviderInfo[] = [
   {
     id: "azaad-cloud",
     label: "Azaad-1 · Cloud",
-    blurb: "Our model on a cloud GPU with the library built in. Free, no key.",
+    blurb: "Our hosted model with the whole library built in. Free, no key. Runs on NVIDIA Nemotron 3 Ultra (550B) with automatic failover.",
     needsKey: false,
     baseUrl: AZAAD_CLOUD_URL,
     models: ["azaad-1"],
@@ -141,6 +141,7 @@ export interface StreamArgs {
   signal: AbortSignal;
   onToken: (t: string) => void;
   onStatus?: (s: string) => void;
+  onUpstream?: (name: string) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -219,6 +220,7 @@ async function streamOpenAI(a: StreamArgs, base: string, extra: Record<string, u
     if (data === "[DONE]") break;
     const ev = JSON.parse(data);
     if (ev.error) throw new Error(ev.error.message ?? String(ev.error));
+    if (ev.azaad_upstream) a.onUpstream?.(ev.azaad_upstream);
     const t = ev.choices?.[0]?.delta?.content;
     if (t) a.onToken(t);
   }
@@ -233,7 +235,7 @@ export async function streamChat(a: StreamArgs): Promise<void> {
       return streamLocal(a);
     case "azaad-cloud":
       if (!info.baseUrl) throw new Error("Azaad-1 Cloud isn't configured on this build yet.");
-      a.onStatus?.("Waking the GPU (first message after idle can take ~1 min)…");
+      a.onStatus?.("Connecting to Azaad-1 (first message after a quiet spell can take ~30s)…");
       return streamOpenAI(a, `${info.baseUrl}/v1`);
     case "custom":
     case "ollama":
