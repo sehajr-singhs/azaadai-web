@@ -13,7 +13,7 @@ import urllib.request
 
 API = "https://rest.runpod.io/v1"
 KEY = os.environ["RUNPOD_API_KEY"]
-NAME = "azaad"
+NAME = os.environ.get("AZAAD_NAME", "azaad")
 
 BASE = os.environ.get("AZAAD_BASE", "RedHatAI/gemma-4-31B-it-FP8-dynamic")
 ADAPTERS = {"azaad": "Sejibeji/azaad-lora", "azaad-research": "Sejibeji/azaad-research-lora"}
@@ -33,10 +33,18 @@ ENV = {
     "MAX_LORA_RANK": "32",
     "MAX_LORAS": "2",
     "VLLM_EXTRA_ARGS": "--lora-modules " + " ".join(f"{k}={v}" for k, v in ADAPTERS.items()),
+    # Gemma 4's multi-token-prediction drafter: same output, fewer forward passes.
+    "SPECULATIVE_CONFIG": json.dumps({"model": "google/gemma-4-31B-it-assistant", "num_speculative_tokens": int(os.environ.get("AZAAD_SPEC_TOKENS", "3"))}),
 }
+if os.environ.get("AZAAD_SPEC_TOKENS") == "0":
+    del ENV["SPECULATIVE_CONFIG"]
 
 # 48 GB Ada/Hopper cards run FP8 natively; 80 GB cards are the fallback.
-GPUS = ["NVIDIA L40S", "NVIDIA RTX 6000 Ada Generation", "NVIDIA L40", "NVIDIA H100 80GB HBM3", "NVIDIA H100 PCIe", "NVIDIA A100 80GB PCIe", "NVIDIA A100-SXM4-80GB"]
+GPUS_48 = ["NVIDIA L40S", "NVIDIA RTX 6000 Ada Generation", "NVIDIA L40"]
+# Blackwell RTX PRO 6000 workers exited at startup with this vLLM build, so they're left out.
+GPUS_80 = ["NVIDIA H100 80GB HBM3", "NVIDIA H100 PCIe", "NVIDIA H100 NVL", "NVIDIA H200", "NVIDIA A100-SXM4-80GB", "NVIDIA A100 80GB PCIe"]
+# The MTP drafter needs headroom a 48 GB card doesn't have at 32K context.
+GPUS = GPUS_80 if "SPECULATIVE_CONFIG" in ENV else GPUS_48 + GPUS_80
 
 
 def call(method: str, path: str, body: dict | None = None):
@@ -72,7 +80,7 @@ def main():
         "gpuCount": 1,
         "workersMin": int(os.environ.get("AZAAD_MIN_WORKERS", "0")),
         "workersMax": 2,
-        "idleTimeout": 600,
+        "idleTimeout": 480,
         "flashboot": True,
         "scalerType": "QUEUE_DELAY",
         "scalerValue": 4,

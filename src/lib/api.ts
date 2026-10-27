@@ -22,6 +22,7 @@ export interface TraceStep {
   gaps?: string[];
   documents?: string[];
   detail?: string;
+  passages?: { n: number; title: string; heading: string; snippet: string }[];
 }
 
 export interface ChatMsg {

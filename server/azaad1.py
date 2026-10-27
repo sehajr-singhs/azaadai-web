@@ -51,7 +51,7 @@ BASE_MODEL = "google/gemma-4-31B-it"  # used for planning steps
 ALLOWED_ORIGINS = ["https://sehajr-singhs.github.io", "http://localhost:5173", "http://localhost:4173"]
 
 TIERS = {
-    "public": {"model": PUBLIC_MODEL, "queries": 3, "hits": 10, "budget": 12000, "max_tokens": 3000, "rounds": 1, "limit": 40},
+    "public": {"model": PUBLIC_MODEL, "queries": 4, "hits": 10, "budget": 13000, "max_tokens": 3000, "rounds": 2, "limit": 40},
     "research": {"model": RESEARCH_MODEL, "queries": 6, "hits": 18, "budget": 26000, "max_tokens": 5000, "rounds": 2, "limit": 300},
 }
 
@@ -84,7 +84,12 @@ def fuse(lib: L.Library, queries: list[str], k: int, per_query: int = 8, exclude
         hits = lib.search(q, per_query, exclude=exclude)
         for rank, (i, _) in enumerate(hits):
             score[i] += 1 / (60 + rank)
-        report.append({"query": q, "found": list(dict.fromkeys(lib.docs[lib.chunks[i][0]]["title"] for i, _ in hits))[:4]})
+        found = []
+        for i, _ in hits[:4]:
+            d, heading, _body = lib.chunks[i]
+            title = lib.docs[d]["title"]
+            found.append(f"{title} › {heading}" if heading and heading != title else title)
+        report.append({"query": q, "found": list(dict.fromkeys(found))})
     ids = sorted(score, key=score.get, reverse=True)[:k]
     return ids, report
 
@@ -283,13 +288,17 @@ class Gateway:
                     except Exception:  # noqa: BLE001
                         gap = {"gaps": [], "queries": []}
                     if gap.get("queries"):
-                        more, report2 = fuse(lib, gap["queries"][:3], 8, exclude=set(ids))
+                        more, report2 = fuse(lib, gap["queries"][:3], 8 if tier == "research" else 4, exclude=set(ids))
                         ids += more
                         yield trace("reflect", "Looked for what was missing", gaps=gap.get("gaps", []), searches=report2)
 
                 excerpts, sources = lib.excerpts(ids, cfg["budget"])
                 papers = list(dict.fromkeys(s["title"] for s in sources))
-                yield trace("read", f"Reading {len(sources)} passages from {len(papers)} {'documents' if len(papers) != 1 else 'document'}", documents=papers)
+                passages = []
+                for src, i in zip(sources, ids):
+                    snippet = re.sub(r"\s+", " ", lib.chunks[i][2]).strip()
+                    passages.append({"n": src["n"], "title": src["title"], "heading": src["heading"], "snippet": snippet[:220] + ("…" if len(snippet) > 220 else "")})
+                yield trace("read", f"Reading {len(sources)} passages from {len(papers)} {'documents' if len(papers) != 1 else 'document'}", documents=papers, passages=passages)
                 yield ev(azaad_sources=sources)
 
                 # 4. Answer, streaming the model's own reasoning first
@@ -347,6 +356,9 @@ class Gateway:
                     async for e in run():
                         yield f"data: {json.dumps(e)}\n\n"
                 except Exception as exc:  # noqa: BLE001
+                    import traceback
+
+                    traceback.print_exc()
                     yield f"data: {json.dumps({'error': {'message': f'Azaad is unavailable right now ({exc.__class__.__name__}). Try again in a minute.'}})}\n\n"
                 yield "data: [DONE]\n\n"
 

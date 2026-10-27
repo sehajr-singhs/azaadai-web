@@ -52,7 +52,11 @@ export const VOICES: [string, string, string][] = [
   ["Lok", "the ordinary Sangat: families, jobs, Gurdwara life", "over-weights short-term comfort"],
 ];
 
-function Row({ id, icon, label, children, side }: { id?: string; icon?: ReactNode; label: string; children: ReactNode; side?: ReactNode }) {
+function Beta() {
+  return <span className="ml-1.5 rounded-[3px] border border-paper/40 px-1 py-px align-middle text-[9.5px] font-semibold uppercase tracking-[0.08em] text-paper/70">Beta</span>;
+}
+
+function Row({ id, icon, label, children, side }: { id?: string; icon?: ReactNode; label: ReactNode; children: ReactNode; side?: ReactNode }) {
   return (
     <section id={id} className="grid-row scroll-mt-20 py-14 md:py-20">
       <div className="flex flex-col gap-2">
@@ -249,12 +253,12 @@ export function Home({ route, onAsk, access, onAccess }: {
       <Row
         id="swarm"
         icon={<Mark className="h-[18px] w-[40px] text-paper" />}
-        label="The Swarm"
+        label={<>The Swarm<Beta /></>}
         side={<a href="#/ask" className="ln">Ask with the Council on</a>}
       >
         <div className="flex flex-col gap-4">
           <p>
-            Turn on <span className="font-semibold">Council</span> and Azaad convenes eight voices before it answers. Each holds a mandate and a known bias. They attack the proposition, answer their critics from the library, and refine it until no critique stands unanswered. You get the synthesis: where they agreed, where they split, the critical vulnerabilities, the strategic pivot and the counsel.
+            The Swarm is in beta. Turn on <span className="font-semibold">Council</span> and Azaad convenes eight voices before it answers. Each holds a mandate and a known bias. They attack the proposition, answer their critics from the library, and refine it until no critique stands unanswered. You get the synthesis: where they agreed, where they split, the critical vulnerabilities, the strategic pivot and the counsel.
           </p>
           <ul className="flex flex-col gap-2">
             {VOICES.map(([name, mandate, bias]) => (

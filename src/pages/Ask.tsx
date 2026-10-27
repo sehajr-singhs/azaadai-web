@@ -117,7 +117,13 @@ function StepDetail({ s, turn, live }: { s: TraceStep; turn: Turn; live: boolean
     list?.map((x, k) => (
       <div key={k} className="mt-1.5">
         {chip(x.query, 0)}
-        {x.found.length > 0 && <p className="mt-0.5 text-[11.5px] text-paper/50">→ {x.found.slice(0, 3).join(" · ")}</p>}
+        {x.found.length > 0 && (
+          <ul className="mt-0.5 flex flex-col gap-0.5 text-[11.5px] leading-[1.4] text-paper/50">
+            {x.found.slice(0, 3).map((f) => (
+              <li key={f}>→ {f}</li>
+            ))}
+          </ul>
+        )}
       </div>
     ));
   switch (s.step) {
@@ -139,7 +145,7 @@ function StepDetail({ s, turn, live }: { s: TraceStep; turn: Turn; live: boolean
         </div>
       );
     case "read":
-      return (
+      return s.passages?.length ? <Passages list={s.passages} /> : (
         <ul className="mt-1 flex flex-col gap-0.5 text-[11.5px] text-paper/55">
           {s.documents?.slice(0, 8).map((d) => (
             <li key={d}>{d}</li>
@@ -155,6 +161,30 @@ function StepDetail({ s, turn, live }: { s: TraceStep; turn: Turn; live: boolean
     default:
       return null;
   }
+}
+
+function Passages({ list }: { list: NonNullable<TraceStep["passages"]> }) {
+  const [all, setAll] = useState(false);
+  const shown = all ? list : list.slice(0, 4);
+  return (
+    <div className="mt-1.5 flex flex-col gap-2">
+      {shown.map((p) => (
+        <div key={p.n} className="text-[11.5px] leading-[1.45]">
+          <p className="text-paper/80">
+            <span className="cite mr-1 translate-y-0">{p.n}</span>
+            {p.title}
+            {p.heading && <span className="text-paper/50"> › {p.heading}</span>}
+          </p>
+          <p className="mt-0.5 line-clamp-2 text-paper/45">{p.snippet}</p>
+        </div>
+      ))}
+      {list.length > 4 && (
+        <button type="button" onClick={() => setAll(!all)} className="w-fit text-[11.5px] text-paper/50 hover:text-paper">
+          {all ? "Show fewer" : `Show all ${list.length} passages`}
+        </button>
+      )}
+    </div>
+  );
 }
 
 function Sources({ sources, cited }: { sources: Source[]; cited: Set<number> }) {
@@ -205,7 +235,7 @@ function Exchange({ turn, onRetry }: { turn: Turn; onRetry: () => void }) {
       <div className="order-1 min-w-0 lg:order-2">
         <p className="mb-2 flex flex-wrap items-center gap-2 text-[11.5px] font-medium text-paper/50">
           <span>{tierLabel}</span>
-          {turn.council && <span>· Council</span>}
+          {turn.council && <span>· Council (beta)</span>}
           {turn.ms && <span>· {(turn.ms / 1000).toFixed(1)}s</span>}
         </p>
         <h2 className="mb-6 text-[24px] font-semibold leading-[1.2] tracking-[-0.02em] md:text-[28px]">{turn.q}</h2>
@@ -713,6 +743,7 @@ export function Ask({ route, settings, setSettings, access, onAccess, pending, c
                   <label className="flex cursor-pointer items-center gap-1.5 hover:text-paper">
                     <input type="checkbox" checked={settings.council} onChange={(e) => setSettings({ ...settings, council: e.target.checked })} className="accent-[#003cff]" />
                     Council
+                    <span className="rounded-[3px] border border-paper/30 px-1 text-[9px] font-semibold uppercase tracking-[0.08em] text-paper/55">Beta</span>
                   </label>
                   {access.code && (
                     <label className="flex cursor-pointer items-center gap-1.5 hover:text-paper">

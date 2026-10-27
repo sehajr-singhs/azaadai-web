@@ -37,7 +37,7 @@ For each question the gateway:
 
 Each step streams as an `azaad_trace` event, the reasoning as `reasoning_content`, the passages as `azaad_sources`.
 
-## The Swarm
+## The Swarm (beta)
 
 `council: true` (the **Council** switch, or `azaad -c`) convenes eight voices before the answer: Bunga Strategist, Toshakhana Warden, Fauj Guardian, Parchaarak, Vyapari, Dandani, Gurmukh and Lok. Each holds a mandate and a known bias. Three passes (Attack, Counter, Refine), then only the synthesis is printed (`prompts/council.md`).
 

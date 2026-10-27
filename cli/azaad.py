@@ -45,7 +45,7 @@ WORD = r"""
 ╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝╚═════╝"""
 
 HELP = """\
-  /council        toggle the Council (eight voices, three passes, one synthesis)
+  /council        toggle the Council, beta (eight voices, three passes, one synthesis)
   /research       toggle research mode (needs an access code)
   /trace          toggle the line of research
   /sources        list the sources behind the last answer
@@ -235,12 +235,18 @@ class Turn:
         if t.get("detail"):
             print(dim(f"  {t['detail']}"))
         for s in t.get("searches") or []:
-            found = " · ".join(s["found"][:3])
-            print(dim(f"  {s['query']}") + (dim(f"  → {found}") if found else ""))
+            print("  " + sty("38;5;250", s["query"]))
+            for f in s["found"][:3]:
+                print(dim(f"    → {f}"))
         for g in t.get("gaps") or []:
             print(dim(f"  gap: {g}"))
-        if t["step"] == "read" and t.get("documents"):
-            print(dim("  " + " · ".join(t["documents"][:6])))
+        if t["step"] == "read":
+            for p in (t.get("passages") or [])[:6]:
+                head = f" › {p['heading']}" if p.get("heading") else ""
+                print("  " + blue(f"[{p['n']}]") + f" {p['title']}" + dim(head))
+                print(dim("      " + textwrap.shorten(p["snippet"], width() - 8)))
+            if not t.get("passages") and t.get("documents"):
+                print(dim("  " + " · ".join(t["documents"][:6])))
         if t["step"] == "reason":
             self.in_reason = True
 
@@ -418,7 +424,7 @@ class Session:
             print(HELP)
         elif cmd == "/council":
             self.council = not self.council
-            print(dim(f"council {'on' if self.council else 'off'}"))
+            print(dim(f"council (beta) {'on' if self.council else 'off'}"))
         elif cmd == "/research":
             if not self.cfg.get("code"):
                 print(dim("research mode needs an access code: azaad login <code>"))
@@ -477,7 +483,7 @@ class Session:
 def main():
     ap = argparse.ArgumentParser(prog="azaad", description="Bunga Azaadi's model in your terminal.")
     ap.add_argument("question", nargs="*", help="ask once and exit, or: login <code> | logout | status")
-    ap.add_argument("-c", "--council", action="store_true", help="convene the eight-voice Council")
+    ap.add_argument("-c", "--council", action="store_true", help="convene the eight-voice Council (beta)")
     ap.add_argument("--public", action="store_true", help="use the public model even when logged in")
     ap.add_argument("--engine", default=os.environ.get("AZAAD_ENGINE", "azaad"), choices=["azaad", "ollama", "claude"])
     ap.add_argument("--model", help="model for the ollama or claude engines")

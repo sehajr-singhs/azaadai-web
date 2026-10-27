@@ -101,6 +101,7 @@ export function Footer() {
           <Out href="https://azadism.co.uk/">azadism.co.uk</Out>
         </div>
       </div>
+      <p className="px-4 pb-6 text-[12px] text-paper/70 sm:px-5">Developed by Sehaj Randhir Singh in tandem with Ranjit Singh.</p>
     </footer>
   );
 }
