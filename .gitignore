@@ -25,3 +25,11 @@ dist-ssr
 
 .env
 .env.*
+
+# training artifacts
+train/data/
+adapters/
+*.jsonl
+__pycache__/
+public/azaad.py
+public/azaad.md

@@ -3,59 +3,132 @@
 @tailwind utilities;
 
 @layer base {
-  :root {
-    --background: 0 0% 100%;
-    --foreground: 0 0% 9%;
-    --card: 0 0% 100%;
-    --card-foreground: 0 0% 9%;
-    --primary: 0 0% 9%;
-    --primary-foreground: 0 0% 98%;
-    --secondary: 0 0% 96.5%;
-    --secondary-foreground: 0 0% 9%;
-    --muted: 0 0% 96.5%;
-    --muted-foreground: 0 0% 42%;
-    --accent: 0 0% 95%;
-    --accent-foreground: 0 0% 9%;
-    --border: 0 0% 90%;
-    --input: 0 0% 88%;
-    --ring: 225 100% 40%;
-    --link: 225 100% 40%;   /* bungaazaadi.com #0033cc */
-    --gold: 37 79% 42%;     /* bungaazaadi.com #bf7f17 */
-    --destructive: 0 72% 50%;
-    --radius: 0.625rem;
+  html {
+    background: #000;
+    color: #fff;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
   }
-  .dark {
-    --background: 0 0% 0%;
-    --foreground: 0 0% 90%;
-    --card: 0 0% 4%;
-    --card-foreground: 0 0% 90%;
-    --primary: 0 0% 96%;
-    --primary-foreground: 0 0% 7%;
-    --secondary: 0 0% 10%;
-    --secondary-foreground: 0 0% 92%;
-    --muted: 0 0% 10%;
-    --muted-foreground: 0 0% 60%;
-    --accent: 0 0% 12%;
-    --accent-foreground: 0 0% 96%;
-    --border: 0 0% 15%;
-    --input: 0 0% 18%;
-    --ring: 228 100% 64%;
-    --link: 228 100% 64%;   /* bungaazaadi.com dark #466cff */
-    --gold: 38 72% 55%;
-    --destructive: 0 63% 55%;
+  body {
+    @apply bg-ink font-sans text-paper;
   }
-  * { @apply border-border; }
-  html, body, #root { height: 100%; }
-  body { @apply bg-background text-foreground font-sans antialiased; font-feature-settings: "cv11", "ss01"; }
-  ::selection { background: hsl(var(--link) / 0.18); }
+  ::selection {
+    background: #003cff;
+    color: #fff;
+  }
+  :focus-visible {
+    outline: 2px solid #003cff;
+    outline-offset: 2px;
+  }
 }
 
 @layer components {
-  .answer { @apply prose prose-neutral dark:prose-invert max-w-none font-serif text-[1.075rem] leading-[1.7]; }
-  .answer h2, .answer h3 { @apply font-sans text-[0.95rem] font-semibold tracking-tight mt-6 mb-2; }
-  .answer a { @apply text-link no-underline hover:underline; }
-  .answer code { @apply font-mono text-[0.9em] before:content-none after:content-none bg-muted px-1 py-0.5 rounded; }
-  .answer blockquote { @apply border-l-gold/70 not-italic text-foreground/80; }
-  .cite { @apply inline-flex items-center justify-center align-super ml-0.5 h-[1.15rem] min-w-[1.15rem] px-1 rounded-full border border-link/30 bg-link/5 font-mono text-[0.65rem] leading-none text-link no-underline hover:bg-link hover:text-white transition-colors; }
-  .scroll-thin { scrollbar-width: thin; scrollbar-color: hsl(var(--border)) transparent; }
+  /* azadism.co.uk-style link: dotted underline, arrow after */
+  .ln {
+    @apply inline-flex items-baseline gap-1 underline decoration-dotted decoration-1 underline-offset-[3px] transition-colors hover:text-paper hover:decoration-solid;
+  }
+  .label {
+    @apply text-[13px] font-semibold tracking-[-0.01em];
+  }
+  .grid-row {
+    @apply grid grid-cols-1 gap-y-5 px-4 sm:px-5 md:grid-cols-[1fr_minmax(0,560px)_minmax(160px,1fr)] md:gap-x-10 lg:gap-x-16;
+  }
+
+  /* Answers */
+  .answer {
+    @apply text-[16.5px] leading-[1.62] text-paper/90;
+  }
+  .answer > * + * {
+    margin-top: 0.85em;
+  }
+  .answer h1,
+  .answer h2,
+  .answer h3,
+  .answer h4 {
+    @apply text-[17px] font-semibold tracking-[-0.01em] text-paper;
+    margin-top: 1.5em;
+  }
+  .answer strong {
+    @apply font-semibold text-paper;
+  }
+  .answer em {
+    font-style: italic;
+  }
+  .answer ul,
+  .answer ol {
+    padding-left: 1.2em;
+  }
+  .answer ul {
+    list-style: disc;
+  }
+  .answer ol {
+    list-style: decimal;
+  }
+  .answer li + li {
+    margin-top: 0.35em;
+  }
+  .answer li::marker {
+    color: #8a8a8a;
+  }
+  .answer blockquote {
+    @apply border-l border-paper/30 pl-4 text-paper/75;
+  }
+  .answer code {
+    @apply rounded bg-ash-3 px-1 py-0.5 font-mono text-[0.85em];
+  }
+  .answer pre {
+    @apply overflow-x-auto rounded bg-ash-2 p-3 font-mono text-[13px];
+  }
+  .answer a:not(.cite) {
+    @apply underline decoration-dotted underline-offset-[3px];
+  }
+  .answer table {
+    @apply w-full text-left text-[14px];
+  }
+  .answer th,
+  .answer td {
+    @apply border-b border-ash-3 py-1.5 pr-3 align-top;
+  }
+  .cite {
+    @apply mx-[1px] inline-flex h-[17px] min-w-[17px] -translate-y-[2px] items-center justify-center rounded-[3px] bg-paper/10 px-1 font-mono text-[10.5px] font-medium text-paper/80 no-underline transition-colors hover:bg-blue hover:text-paper;
+  }
+  .caret::after {
+    content: "";
+    display: inline-block;
+    width: 0.5em;
+    height: 1em;
+    margin-left: 2px;
+    vertical-align: -0.15em;
+    background: currentColor;
+    animation: blink 1s steps(2, start) infinite;
+  }
+}
+
+@keyframes blink {
+  to {
+    visibility: hidden;
+  }
+}
+
+@keyframes fadein {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.fade-in {
+  animation: fadein 0.6s ease both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
 }

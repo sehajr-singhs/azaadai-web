@@ -27,7 +27,7 @@ jobs:
       - run: npm run build
         env:
           VITE_BASE: /${{ github.event.repository.name }}/
-          VITE_AZAAD_CLOUD_URL: ${{ vars.AZAAD_CLOUD_URL }}
+          VITE_AZAAD_URL: ${{ vars.AZAAD_URL }}
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist

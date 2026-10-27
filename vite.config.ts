@@ -5,7 +5,5 @@ import react from "@vitejs/plugin-react";
 export default defineConfig({
   base: process.env.VITE_BASE ?? "/azaadai-web/",
   plugins: [react()],
-  worker: { format: "es" },
   build: { target: "es2022" },
-  optimizeDeps: { exclude: ["@mlc-ai/web-llm"] },
 });

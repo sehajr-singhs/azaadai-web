@@ -1,100 +1,87 @@
+import type { Source, TraceStep } from "./api";
 import type { ProviderId } from "./providers";
-import type { Hit } from "./library";
-import { formatExcerpts } from "./library";
-import azaadPrompt from "../../prompts/azaad.md?raw";
-import councilPrompt from "../../prompts/council.md?raw";
 
-export interface Source {
-  n: number;
-  title: string;
-  heading: string;
-  url: string;
-  core: boolean;
-}
-
-export interface Message {
-  role: "user" | "assistant";
-  content: string;
-  sources?: Source[];
-  model?: string;
+export interface Turn {
+  id: string;
+  q: string;
+  answer: string;
+  reasoning: string;
+  trace: TraceStep[];
+  sources: Source[];
+  tier: "public" | "research" | "byok";
+  model: string;
+  council: boolean;
+  status: "running" | "done" | "error" | "stopped";
   error?: string;
+  started: number;
+  ms?: number;
 }
 
 export interface Conversation {
   id: string;
   title: string;
-  messages: Message[];
+  turns: Turn[];
   updated: number;
 }
 
 export interface Settings {
-  provider: ProviderId;
+  engine: "azaad" | ProviderId;
   models: Partial<Record<ProviderId, string>>;
   baseUrls: Partial<Record<ProviderId, string>>;
   council: boolean;
-  rememberKeys: boolean;
+  research: boolean; // only honoured with a valid access code
 }
 
-const DEFAULTS: Settings = {
-  provider: "azaad-cloud",
-  models: {},
-  baseUrls: {},
-  council: false,
-  rememberKeys: true,
-};
+const DEFAULTS: Settings = { engine: "azaad", models: {}, baseUrls: {}, council: false, research: true };
 
-function read<T>(store: Storage | undefined, key: string, fallback: T): T {
+function read<T>(key: string, fallback: T): T {
   try {
-    const v = store?.getItem(key);
-    return v ? (JSON.parse(v) as T) : fallback;
+    const raw = localStorage.getItem(key);
+    return raw ? { ...fallback, ...JSON.parse(raw) } : fallback;
   } catch {
     return fallback;
   }
 }
 
-function write(store: Storage | undefined, key: string, value: unknown) {
+function write(key: string, value: unknown) {
   try {
-    store?.setItem(key, JSON.stringify(value));
+    localStorage.setItem(key, JSON.stringify(value));
   } catch {
-    /* storage blocked */
+    /* storage full or blocked */
   }
 }
 
-const ls = typeof localStorage !== "undefined" ? localStorage : undefined;
-const ss = typeof sessionStorage !== "undefined" ? sessionStorage : undefined;
+export const loadSettings = () => read<Settings>("azaad.settings.v2", DEFAULTS);
+export const saveSettings = (s: Settings) => write("azaad.settings.v2", s);
 
-export const loadSettings = (): Settings => ({ ...DEFAULTS, ...read(ls, "azaad.settings", {}) });
-export const saveSettings = (s: Settings) => write(ls, "azaad.settings", s);
+export const loadAccess = () => read<{ code: string; group: string }>("azaad.access", { code: "", group: "" });
+export const saveAccess = (a: { code: string; group: string }) => write("azaad.access", a);
 
-// Keys live in localStorage when "remember" is on, otherwise only for the tab.
-export function loadKeys(): Partial<Record<ProviderId, string>> {
-  return { ...read(ls, "azaad.keys", {}), ...read(ss, "azaad.keys", {}) };
-}
-export function saveKeys(keys: Partial<Record<ProviderId, string>>, remember: boolean) {
-  write(remember ? ls : ss, "azaad.keys", keys);
+export function loadKey(p: ProviderId): string {
   try {
-    (remember ? ss : ls)?.removeItem("azaad.keys");
+    return localStorage.getItem(`azaad.key.${p}`) ?? "";
+  } catch {
+    return "";
+  }
+}
+export function saveKey(p: ProviderId, key: string) {
+  try {
+    if (key) localStorage.setItem(`azaad.key.${p}`, key);
+    else localStorage.removeItem(`azaad.key.${p}`);
   } catch {
     /* ignore */
   }
 }
 
-export const loadConversations = (): Conversation[] => read(ls, "azaad.conversations", []);
-export const saveConversations = (c: Conversation[]) => write(ls, "azaad.conversations", c.slice(0, 100));
-
-export const newId = () => Math.random().toString(36).slice(2, 10);
-
-export function buildSystem(hits: Hit[], budget: number, council: boolean): string {
-  const excerpts = hits.length ? formatExcerpts(hits, budget) : "(No library excerpts matched this question.)";
-  return `${azaadPrompt}\n\n${council ? councilPrompt + "\n\n" : ""}## LIBRARY EXCERPTS\n\n${excerpts}`;
+export function loadConversations(): Conversation[] {
+  try {
+    return JSON.parse(localStorage.getItem("azaad.conversations.v2") ?? "[]");
+  } catch {
+    return [];
+  }
+}
+export function saveConversations(c: Conversation[]) {
+  write("azaad.conversations.v2", c.slice(0, 60).map((x) => ({ ...x, turns: x.turns.map((t) => (t.status === "running" ? { ...t, status: "stopped" } : t)) })));
 }
 
-export function sourcesFrom(hits: Hit[]): Source[] {
-  return hits.map((h, i) => ({
-    n: i + 1,
-    title: h.doc.title,
-    heading: h.chunk.heading !== h.doc.title ? h.chunk.heading : "",
-    url: h.doc.url,
-    core: h.doc.core,
-  }));
-}
+export const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);

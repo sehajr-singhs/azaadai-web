@@ -1,344 +1,129 @@
-"""Azaad-1: the AzaadAI cloud model on Modal.
+"""Azaad: Bunga Azaadi's model, served through a small gateway on Modal.
 
-Azaad-1 is the Azaad persona plus the Bunga Azaadi library (indexed at boot,
-retrieved per request) in front of a chain of inference upstreams. The gateway
-tries each in order and fails over before the first token:
+The model is Gemma 4 31B with LoRA adapters trained on the Institute's work,
+running on a RunPod Serverless GPU endpoint that scales to zero. This gateway
+is the only thing that holds the RunPod key. It also:
 
-  1. our own Qwen3.5-9B on a Modal GPU (vLLM, FP8, MTP), when deployed with
-     AZAAD_GPU=1 (needs a payment method on the Modal workspace)
-  2. NVIDIA Nemotron 3 Ultra 550B, via Kilo Gateway's free tier
-  3. NVIDIA Nemotron 3 Super 120B, via Kilo Gateway's free tier
-  4. any keyed providers in the optional `azaad-upstreams` Modal secret
-     (OPENROUTER_API_KEY, GROQ_API_KEY, NVIDIA_API_KEY)
+  - keeps the library index and does retrieval (public tier: the four core
+    papers; research tier: the whole Vichaar Repository)
+  - runs the research loop (plan -> search -> reflect -> search -> answer) and
+    streams every step as a trace, alongside the model's own reasoning
+  - checks access codes for the internal research tier
+  - rate-limits
 
-    modal deploy server/azaad1.py                       # gateway only (CPU)
-    AZAAD_GPU=1 modal deploy server/azaad1.py           # plus our own GPU model
+    modal deploy server/azaad1.py
 
-Clients that already attach library excerpts (the AzaadAI site does) are passed
-straight through. Plain API callers get server-side retrieval, so
-`{"model": "azaad-1", "messages": [...]}` is grounded with no extra work.
+Secrets (Modal):
+  azaad-runpod   RUNPOD_API_KEY, RUNPOD_ENDPOINT_ID
+  azaad-access   AZAAD_ACCESS_CODES = "group:code,group2:code2"
 """
 
+import asyncio
+import hmac
 import json
-import math
 import os
 import re
-import subprocess
 import time
-import urllib.parse
-from collections import Counter, defaultdict
+from collections import defaultdict
 from pathlib import Path
 
 import modal
 
-BASE_MODEL = "Qwen/Qwen3.5-9B"
-SERVED_NAME = "azaad-1"
-MAX_LEN = 32768
+import azaad_lib as L
+
 PROMPTS = Path(__file__).resolve().parent.parent / "prompts"
 
-USE_GPU = os.environ.get("AZAAD_GPU") == "1"
-
-gateway_image = (
+image = (
     modal.Image.debian_slim(python_version="3.12")
     .uv_pip_install("fastapi[standard]", "httpx", "pypdf")
     .add_local_dir(str(PROMPTS), "/prompts")
+    .add_local_python_source("azaad_lib")
 )
-gpu_image = (
-    modal.Image.from_registry("nvidia/cuda:12.8.1-devel-ubuntu22.04", add_python="3.12")
-    .entrypoint([])
-    .uv_pip_install("vllm==0.32.0", "huggingface_hub[hf_transfer]", "fastapi[standard]", "httpx")
-    .env({"HF_HUB_ENABLE_HF_TRANSFER": "1"})
-)
-
-hf_cache = modal.Volume.from_name("azaad1-hf-cache", create_if_missing=True)
 library_cache = modal.Volume.from_name("azaad1-library", create_if_missing=True)
-LIBRARY_FILE = Path("/library/library.json")
-vllm_cache = modal.Volume.from_name("azaad1-vllm-cache", create_if_missing=True)
-upstream_secret = modal.Secret.from_name("azaad-upstreams")
+LIBRARY_FILE = Path("/library/docs.v2.json")
 
-app = modal.App("azaad-1")
+app = modal.App("azaad")
 
-KILO = "https://api.kilo.ai/api/gateway/v1"
-GPU_URL = "https://sehajr-singhs--azaad-1-qwen.modal.run/v1"
+PUBLIC_MODEL = "azaad"            # LoRA trained on the four core papers
+RESEARCH_MODEL = "azaad-research"  # LoRA trained on the whole repository
+BASE_MODEL = "google/gemma-4-31B-it"  # used for planning steps
 
-ALLOWED_ORIGINS = [
-    "https://sehajr-singhs.github.io",
-    "http://localhost:5173",
-    "http://localhost:4173",
-]
+ALLOWED_ORIGINS = ["https://sehajr-singhs.github.io", "http://localhost:5173", "http://localhost:4173"]
 
-# ---------------------------------------------------------------------------
-# Library (mirrors src/lib/library.ts)
-# ---------------------------------------------------------------------------
+TIERS = {
+    "public": {"model": PUBLIC_MODEL, "queries": 3, "hits": 10, "budget": 12000, "max_tokens": 3000, "rounds": 1, "limit": 40},
+    "research": {"model": RESEARCH_MODEL, "queries": 6, "hits": 18, "budget": 26000, "max_tokens": 5000, "rounds": 2, "limit": 300},
+}
 
-SITE_UID = "8a12b61764a2b0b075c408ab3423a91e"
-HOST = "https://publish-01.obsidian.md"
-DYP_PDF = "img/Dharam_Yudh_Pipeline_Whitepaper.pdf"
-CORE = [r"Azadist Manifesto/", r"Khalistan Vs Khalsa Raaj", r"The Khalsa Is The Guru", r"Dharam Yudh Pipeline", r"Azadism in 500 Words"]
-STOP = set(
-    "a an and are as at be but by for from has have he her his i if in into is it its of on or our she so than that the their them then "
-    "there these they this to was we were what when which who why will with you your not do does did can could should would about how "
-    "all any more most also just only over such".split()
-)
+PLAN_PROMPT = """You plan library searches for Bunga Azaadi's model. The library is {scope}.
 
+Conversation so far (most recent last):
+{convo}
 
-def public_url(path: str) -> str:
-    parts = [urllib.parse.quote(p).replace("%20", "+") for p in path.removesuffix(".md").split("/")]
-    return "https://bungaazaadi.com/" + "/".join(parts)
+Return JSON only: {{"intent": "<what the person really wants, one short line>", "queries": ["<search query>", ...]}}
+Write up to {n} short keyword-style queries that would find the passages needed, covering different angles (definitions, the argument, objections, application). Use the Institute's own vocabulary where it fits (Khalsa Raaj, Miri-Piri, NAP, Misl, Sarbat Khalsa, DYP, Stanistan...)."""
 
+REFLECT_PROMPT = """You are checking research coverage for this question:
+{question}
 
-def clean_markdown(md: str) -> str:
-    md = re.sub(r"^---\n.*?\n---\n", "", md, flags=re.S)
-    md = re.sub(r"!\[\[[^\]]*\]\]", "", md)
-    md = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", md)
-    md = re.sub(r"\[\[([^\]|]+)\|([^\]]+)\]\]", r"\2", md)
-    md = re.sub(r"\[\[([^\]]+)\]\]", lambda m: re.sub(r"#.*", "", m.group(1).split("/")[-1]), md)
-    md = re.sub(r"\[([^\]]+)\]\((?:https?:)?[^)]*\)", r"\1", md)
-    md = re.sub(r"<[^>]+>", "", md)
-    md = re.sub(r"^>\s*\[!\w+\][+-]?\s*", "> ", md, flags=re.M)
-    return re.sub(r"\n{3,}", "\n\n", md).strip()
+Passages found so far (titles and opening lines):
+{found}
+
+Return JSON only: {{"gaps": ["<what is still missing>", ...], "queries": ["<search query>", ...]}}
+Name up to 3 gaps and up to 3 new queries to fill them. If coverage is already complete, return empty lists."""
+
+PLAN_SCHEMA = {"type": "object", "properties": {"intent": {"type": "string"}, "queries": {"type": "array", "items": {"type": "string"}}}, "required": ["intent", "queries"]}
+REFLECT_SCHEMA = {"type": "object", "properties": {"gaps": {"type": "array", "items": {"type": "string"}}, "queries": {"type": "array", "items": {"type": "string"}}}, "required": ["gaps", "queries"]}
 
 
-def chunk_doc(text: str, title: str, max_chunk: int = 1400) -> list[tuple[str, str]]:
-    out: list[tuple[str, str]] = []
-    heading, buf = title, ""
-
-    def flush():
-        nonlocal buf
-        if len(buf.strip()) > 40:
-            out.append((heading, buf.strip()))
-        buf = ""
-
-    for para in re.split(r"\n\s*\n", text):
-        h = re.match(r"^#{1,4}\s+(.+)", para)
-        if h:
-            flush()
-            heading = re.sub(r"[*_`]", "", h.group(1)).strip()
-            buf = para[h.end():].strip()
-            continue
-        if len(buf) + len(para) > max_chunk:
-            flush()
-        if len(para) > max_chunk:
-            for s in re.findall(r"[^.!?]+[.!?]+[\"')\]]*\s*|[^.!?]+$", para) or [para]:
-                if len(buf) + len(s) > max_chunk:
-                    flush()
-                buf += s
-        else:
-            buf += ("\n\n" if buf else "") + para
-    flush()
-    return out
+def fuse(lib: L.Library, queries: list[str], k: int, per_query: int = 8, exclude: set[int] | None = None) -> tuple[list[int], list[dict]]:
+    """Reciprocal-rank fusion over several queries. Returns chunk ids and a per-query report."""
+    score: dict[int, float] = defaultdict(float)
+    report = []
+    for q in queries:
+        hits = lib.search(q, per_query, exclude=exclude)
+        for rank, (i, _) in enumerate(hits):
+            score[i] += 1 / (60 + rank)
+        report.append({"query": q, "found": list(dict.fromkeys(lib.docs[lib.chunks[i][0]]["title"] for i, _ in hits))[:4]})
+    ids = sorted(score, key=score.get, reverse=True)[:k]
+    return ids, report
 
 
-def despace(text: str, vocab: Counter) -> str:
-    def freq(w: str) -> int:
-        return 10**6 if w in ("a", "i") else vocab.get(w, 0)
-
-    lines = []
-    for line in text.split("\n"):
-        toks, out, i = line.split(" "), [], 0
-        while i < len(toks):
-            for k in range(min(5, len(toks) - i), 1, -1):
-                parts = toks[i : i + k]
-                core = re.sub(r"[^a-z']", "", "".join(parts).lower())
-                f = freq(core)
-                cores = [re.sub(r"[^a-z']", "", p.lower()) for p in parts]
-                if len(core) >= 2 and f and all(cores) and min(map(freq, cores)) < f:
-                    out.append("".join(parts))
-                    i += k
-                    break
-            else:
-                out.append(toks[i])
-                i += 1
-        lines.append(" ".join(out))
-    return "\n".join(lines)
-
-
-def stem(t: str) -> str:
-    if len(t) > 5 and t.endswith("ing"):
-        return t[:-3]
-    if len(t) > 4 and t.endswith("ies"):
-        return t[:-3] + "y"
-    if len(t) > 3 and t.endswith("s") and not t.endswith("ss"):
-        return t[:-1]
-    return t
-
-
-def tokenize(s: str) -> list[str]:
-    return [stem(t) for t in re.split(r"[^a-z0-9਀-੿]+", s.lower()) if len(t) > 1 and t not in STOP]
-
-
-class Library:
-    def __init__(self):
-        self.docs: list[dict] = []
-        self.chunks: list[tuple[int, str, str]] = []
-        self.tf: list[Counter] = []
-        self.df: Counter = Counter()
-        self.avg = 1.0
-
-    def load(self, cache: Path | None = None, max_age: float = 24 * 3600):
-        """Build the index, reusing a cached copy of the raw texts when fresh."""
-        if cache and cache.exists() and time.time() - cache.stat().st_mtime < max_age:
-            for d in json.loads(cache.read_text(encoding="utf-8")):
-                self._add(d["path"], d["title"], d["url"], d["text"])
-            self.avg = sum(sum(c.values()) for c in self.tf) / max(1, len(self.tf))
-            print(f"library (cached): {len(self.docs)} docs, {len(self.chunks)} chunks")
-            return False
-        self._raw: list[dict] = []
-        self._fetch()
-        if cache:
-            cache.parent.mkdir(parents=True, exist_ok=True)
-            cache.write_text(json.dumps(self._raw), encoding="utf-8")
-        return True
-
-    def _fetch(self):
-        from concurrent.futures import ThreadPoolExecutor
-
-        import httpx
-        from pypdf import PdfReader
-
-        with httpx.Client(timeout=60, follow_redirects=True) as http:
-            index = http.get(f"{HOST}/cache/{SITE_UID}").json()
-            vocab: Counter = Counter({"dyp": 50})
-            paths = [p for p in index if p.endswith(".md")]
-
-            def get(path):
-                try:
-                    r = http.get(f"{HOST}/access/{SITE_UID}/{urllib.parse.quote(path)}")
-                    r.raise_for_status()
-                    return path, r.text
-                except Exception as exc:  # noqa: BLE001
-                    print("skip", path, exc)
-                    return path, None
-
-            with ThreadPoolExecutor(16) as pool:
-                fetched = list(pool.map(get, paths))
-            for path, raw in fetched:
-                if raw is None:
-                    continue
-                text = clean_markdown(raw)
-                if len(text) < 120:
-                    continue
-                vocab.update(re.findall(r"[a-z']{2,}", text.lower()))
-                title = re.sub(r"^\d+\s+", "", path.split("/")[-1].removesuffix(".md"))
-                self._add(path, title, public_url(path), text)
-            try:
-                pdf = http.get(f"{HOST}/access/{SITE_UID}/{urllib.parse.quote(DYP_PDF)}").content
-                tmp = Path("/tmp/dyp.pdf")
-                tmp.write_bytes(pdf)
-                raw = "\n".join(p.extract_text() or "" for p in PdfReader(tmp).pages)
-                raw = "\n".join(l for l in raw.split("\n") if "Whitepaper Published by Bunga Azaadi" not in l)
-                self._add(
-                    "Khalsa Revival/Dharam Yudh Pipeline/Dharam Yudh Pipeline Whitepaper.md",
-                    "The Dharam Yudh Pipeline (Whitepaper)",
-                    public_url("Khalsa Revival/Dharam Yudh Pipeline/Dharam Yudh Pipeline.md"),
-                    despace(re.sub(r"[ \t]+", " ", raw), vocab),
-                )
-            except Exception as exc:  # noqa: BLE001
-                print("DYP whitepaper unavailable", exc)
-        self.avg = sum(sum(c.values()) for c in self.tf) / max(1, len(self.tf))
-        print(f"library: {len(self.docs)} docs, {len(self.chunks)} chunks")
-
-    def _add(self, path: str, title: str, url: str, text: str):
-        if hasattr(self, "_raw"):
-            self._raw.append({"path": path, "title": title, "url": url, "text": text})
-        d = len(self.docs)
-        self.docs.append({"path": path, "title": title, "url": url, "core": any(re.search(c, path) for c in CORE)})
-        for heading, body in chunk_doc(text, title):
-            toks = tokenize(body) + tokenize(f"{title} {heading}") * 2
-            c = Counter(toks)
-            self.df.update(c.keys())
-            self.tf.append(c)
-            self.chunks.append((d, heading, body))
-
-    def search(self, query: str, k: int = 10, max_per_doc: int = 3) -> list[tuple[int, float]]:
-        q = set(tokenize(query))
-        n = len(self.tf)
-        scored = []
-        for i, tf in enumerate(self.tf):
-            s = 0.0
-            ln = sum(tf.values())
-            for t in q:
-                f = tf.get(t)
-                if f:
-                    df = self.df[t]
-                    idf = math.log(1 + (n - df + 0.5) / (df + 0.5))
-                    s += idf * f * 2.4 / (f + 1.4 * (0.28 + 0.72 * ln / self.avg))
-            if s > 0:
-                if self.docs[self.chunks[i][0]]["core"]:
-                    s *= 1.15
-                scored.append((s, i))
-        scored.sort(reverse=True)
-        per_doc: dict[int, int] = defaultdict(int)
-        hits = []
-        for s, i in scored:
-            d = self.chunks[i][0]
-            if per_doc[d] >= max_per_doc:
-                continue
-            per_doc[d] += 1
-            hits.append((i, s))
-            if len(hits) >= k:
-                break
-        return hits
-
-    def excerpts(self, hits, budget: int = 14000) -> tuple[str, list[dict]]:
-        out, sources = "", []
-        for n, (i, _) in enumerate(hits, 1):
-            d, heading, body = self.chunks[i]
-            doc = self.docs[d]
-            block = f"[{n}] {doc['title']}{f' > {heading}' if heading != doc['title'] else ''}\n{body}\n\n"
-            if len(out) + len(block) > budget and n > 1:
-                break
-            out += block
-            sources.append({"n": n, "title": doc["title"], "heading": heading if heading != doc["title"] else "", "url": doc["url"], "core": doc["core"]})
-        return out.strip(), sources
-
-
-# ---------------------------------------------------------------------------
-# Upstreams
-# ---------------------------------------------------------------------------
-
-
-def upstreams() -> list[dict]:
-    """Inference backends in failover order."""
-    out = []
-    if USE_GPU:
-        out.append({"name": "Qwen3.5-9B (Azaad GPU)", "base": GPU_URL, "model": SERVED_NAME, "key": None,
-                    "extra": {"chat_template_kwargs": {"enable_thinking": False}, "top_p": 0.8, "top_k": 20, "presence_penalty": 1.0}})
-    out += [
-        {"name": "Nemotron 3 Ultra 550B", "base": KILO, "model": "nvidia/nemotron-3-ultra-550b-a55b:free", "key": None, "extra": {"reasoning": {"enabled": False}}},
-        {"name": "Nemotron 3 Super 120B", "base": KILO, "model": "nvidia/nemotron-3-super-120b-a12b:free", "key": None, "extra": {"reasoning": {"enabled": False}}},
-    ]
-    if os.environ.get("NVIDIA_API_KEY"):
-        out.append({"name": "NVIDIA NIM", "base": "https://integrate.api.nvidia.com/v1", "model": os.environ.get("NVIDIA_MODEL", "nvidia/nemotron-3-super-120b-a12b"), "key": os.environ["NVIDIA_API_KEY"], "extra": {}})
-    if os.environ.get("GROQ_API_KEY"):
-        out.append({"name": "Groq", "base": "https://api.groq.com/openai/v1", "model": os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b"), "key": os.environ["GROQ_API_KEY"], "extra": {}})
-    if os.environ.get("OPENROUTER_API_KEY"):
-        out.append({"name": "OpenRouter", "base": "https://openrouter.ai/api/v1", "model": os.environ.get("OPENROUTER_MODEL", "openrouter/free"), "key": os.environ["OPENROUTER_API_KEY"], "extra": {}})
-    return out
-
-
-# ---------------------------------------------------------------------------
-# Gateway (CPU, cheap, always available)
-# ---------------------------------------------------------------------------
-
-
-@app.cls(image=gateway_image, secrets=[upstream_secret], volumes={"/library": library_cache}, cpu=1.0, memory=1024, scaledown_window=900, timeout=600, max_containers=2)
+@app.cls(image=image, secrets=[modal.Secret.from_name("azaad-runpod"), modal.Secret.from_name("azaad-access")],
+         volumes={"/library": library_cache}, cpu=1.0, memory=1536, scaledown_window=900, timeout=900, max_containers=2)
 @modal.concurrent(max_inputs=64)
 class Gateway:
     @modal.enter()
     def start(self):
         self.persona = Path("/prompts/azaad.md").read_text(encoding="utf-8")
         self.council = Path("/prompts/council.md").read_text(encoding="utf-8")
-        self.library = Library()
-        if self.library.load(cache=LIBRARY_FILE):
+        docs, fresh = L.load_docs(cache=LIBRARY_FILE)
+        if fresh:
             library_cache.commit()
+        self.libs = {"public": L.Library(docs, public_only=True), "research": L.Library(docs)}
         self.hits: dict[str, list[float]] = defaultdict(list)
+        self.codes = {}
+        for pair in os.environ.get("AZAAD_ACCESS_CODES", "").split(","):
+            if ":" in pair:
+                group, code = pair.split(":", 1)
+                self.codes[code.strip()] = group.strip()
+        self.runpod = f"https://api.runpod.ai/v2/{os.environ['RUNPOD_ENDPOINT_ID']}"
+        self.key = os.environ["RUNPOD_API_KEY"]
+        self.last_use = 0.0
 
-    def _rate_ok(self, ip: str, limit: int = 30, window: float = 600) -> bool:
+    def _group(self, code: str | None) -> str | None:
+        if not code:
+            return None
+        for known, group in self.codes.items():
+            if hmac.compare_digest(known.encode(), code.strip().encode()):
+                return group
+        return None
+
+    def _rate_ok(self, who: str, limit: int, window: float = 600) -> bool:
         now = time.time()
-        q = [t for t in self.hits[ip] if now - t < window]
+        q = [t for t in self.hits[who] if now - t < window]
         q.append(now)
-        self.hits[ip] = q
+        self.hits[who] = q
         return len(q) <= limit
 
     @modal.asgi_app()
@@ -348,84 +133,179 @@ class Gateway:
         from fastapi.middleware.cors import CORSMiddleware
         from fastapi.responses import JSONResponse, StreamingResponse
 
-        api = FastAPI(title="Azaad-1", version="1.1")
-        api.add_middleware(
-            CORSMiddleware,
-            allow_origins=ALLOWED_ORIGINS,
-            allow_origin_regex=r"https://.*\.github\.io",
-            allow_methods=["GET", "POST", "OPTIONS"],
-            allow_headers=["*"],
-        )
-        client = httpx.AsyncClient(timeout=httpx.Timeout(300, connect=15))
+        api = FastAPI(title="Azaad", version="2.0")
+        api.add_middleware(CORSMiddleware, allow_origins=ALLOWED_ORIGINS, allow_origin_regex=r"https://.*\.github\.io",
+                           allow_methods=["GET", "POST", "OPTIONS"], allow_headers=["*"])
+        client = httpx.AsyncClient(timeout=httpx.Timeout(600, connect=20))
+        auth = {"authorization": f"Bearer {self.key}"}
+
+        async def complete(model: str, messages: list, schema: dict | None = None, max_tokens: int = 400) -> str:
+            body = {"model": model, "messages": messages, "max_tokens": max_tokens, "temperature": 0.2,
+                    "chat_template_kwargs": {"enable_thinking": False}}
+            if schema:
+                body["response_format"] = {"type": "json_schema", "json_schema": {"name": "out", "schema": schema}}
+            r = await client.post(f"{self.runpod}/openai/v1/chat/completions", json=body, headers=auth)
+            r.raise_for_status()
+            return r.json()["choices"][0]["message"]["content"] or ""
+
+        def up(w: dict) -> int:
+            return w.get("idle", 0) + w.get("running", 0) + w.get("ready", 0)
+
+        async def workers() -> dict:
+            r = await client.get(f"{self.runpod}/health", headers=auth, timeout=10)
+            return r.json().get("workers", {})
+
+        async def kick():
+            """Queue a one-token request so RunPod starts a worker."""
+            try:
+                await complete(PUBLIC_MODEL, [{"role": "user", "content": "Sat Sri Akaal"}], max_tokens=1)
+            except Exception:  # noqa: BLE001
+                pass
+
+        def tier_of(request: Request, body: dict | None = None) -> tuple[str, str | None]:
+            group = self._group(request.headers.get("x-azaad-access"))
+            wants = (body or {}).get("mode") or request.query_params.get("mode")
+            if group and wants != "public":
+                return "research", group
+            return "public", group
 
         @api.get("/health")
         async def health():
-            return {"status": "ok", "model": SERVED_NAME, "upstreams": [u["name"] for u in upstreams()], "docs": len(self.library.docs), "chunks": len(self.library.chunks)}
+            return {"status": "ok", "model": PUBLIC_MODEL, "docs": {k: len(v.docs) for k, v in self.libs.items()},
+                    "chunks": {k: len(v.chunks) for k, v in self.libs.items()}}
+
+        @api.get("/v1/status")
+        async def status():
+            """Whether a GPU worker is warm. The site shows 'waking up' when it isn't."""
+            try:
+                w = await workers()
+                return {"warm": up(w) > 0, "starting": w.get("initializing", 0) > 0, "workers": w}
+            except Exception as exc:  # noqa: BLE001
+                return {"warm": False, "starting": False, "error": exc.__class__.__name__}
+
+        @api.post("/v1/warm")
+        async def warm():
+            """Start a worker in the background so the first question doesn't wait for a cold boot."""
+            if time.time() - self.last_use > 60:
+                self.last_use = time.time()
+                asyncio.create_task(kick())
+            return {"ok": True}
+
+        @api.post("/v1/access")
+        async def access(request: Request):
+            body = await request.json()
+            ip = request.headers.get("x-forwarded-for", "?").split(",")[0].strip()
+            if not self._rate_ok(f"access:{ip}", 10):
+                return JSONResponse({"error": {"message": "Too many attempts. Wait ten minutes."}}, 429)
+            group = self._group(body.get("code"))
+            if not group:
+                return JSONResponse({"error": {"message": "That code isn't valid."}}, 403)
+            return {"ok": True, "tier": "research", "group": group}
 
         @api.get("/v1/models")
         async def models():
-            return {"object": "list", "data": [{"id": SERVED_NAME, "object": "model", "created": 0, "owned_by": "azaadai"}]}
+            return {"object": "list", "data": [{"id": m, "object": "model", "created": 0, "owned_by": "bunga-azaadi"} for m in (PUBLIC_MODEL, RESEARCH_MODEL)]}
 
         @api.get("/v1/library/search")
-        async def search(q: str, k: int = 8):
-            text, sources = self.library.excerpts(self.library.search(q, min(k, 20)))
-            return {"sources": sources, "excerpts": text}
+        async def search(request: Request, q: str, k: int = 8):
+            tier, _ = tier_of(request)
+            lib = self.libs[tier]
+            ids = [i for i, _ in lib.search(q, min(k, 24))]
+            text, sources = lib.excerpts(ids, TIERS[tier]["budget"])
+            return {"tier": tier, "sources": sources, "excerpts": text}
 
         @api.post("/v1/chat/completions")
         async def chat(request: Request):
-            ip = request.headers.get("x-forwarded-for", request.client.host if request.client else "?").split(",")[0].strip()
-            if not self._rate_ok(ip):
-                return JSONResponse({"error": {"message": "Rate limit: 30 messages per 10 minutes. Try again shortly, or bring your own key."}}, 429)
             body = await request.json()
-            msgs = [m for m in body.get("messages", []) if m.get("role") in ("system", "user", "assistant") and isinstance(m.get("content"), str)]
-            if not any(m["role"] == "user" for m in msgs):
-                return JSONResponse({"error": {"message": "Need at least one user message."}}, 400)
+            tier, group = tier_of(request, body)
+            cfg = TIERS[tier]
+            ip = request.headers.get("x-forwarded-for", request.client.host if request.client else "?").split(",")[0].strip()
+            if not self._rate_ok(group or ip, cfg["limit"]):
+                return JSONResponse({"error": {"message": f"Rate limit: {cfg['limit']} messages per 10 minutes."}}, 429)
+            msgs = [m for m in body.get("messages", []) if m.get("role") in ("user", "assistant") and isinstance(m.get("content"), str)][-12:]
+            if not msgs or msgs[-1]["role"] != "user":
+                return JSONResponse({"error": {"message": "The last message must be from the user."}}, 400)
+            council = bool(body.get("council"))
+            question = msgs[-1]["content"]
+            lib = self.libs[tier]
+            self.last_use = time.time()
 
-            system = "\n\n".join(m["content"] for m in msgs if m["role"] == "system")
-            convo = [m for m in msgs if m["role"] != "system"][-12:]
-            sources: list[dict] = []
-            if "LIBRARY EXCERPTS" not in system:
-                # Plain API caller: ground the request ourselves.
-                users = [m["content"] for m in convo if m["role"] == "user"]
-                council = self.council + "\n\n" if body.get("council") else ""
-                excerpts, sources = self.library.excerpts(self.library.search(" ".join(users[-2:] + users[-1:])))
-                system = f"{self.persona}\n\n{council}## LIBRARY EXCERPTS\n\n{excerpts}" + (f"\n\n{system}" if system else "")
+            async def run():
+                t0 = time.time()
 
-            base_payload = {
-                "messages": [{"role": "system", "content": system}, *convo],
-                "max_tokens": min(int(body.get("max_tokens") or 2048), 4096),
-                "temperature": body.get("temperature", 0.7),
-            }
+                def ev(**kw):
+                    return {"object": "chat.completion.chunk", "model": cfg["model"], "choices": [], **kw}
 
-            async def open_upstream():
-                """First backend that answers 200 wins; failover happens before any token is sent."""
-                errors = []
-                for u in upstreams():
-                    headers = {"content-type": "application/json"}
-                    if u["key"]:
-                        headers["authorization"] = f"Bearer {u['key']}"
-                    payload = {**base_payload, **u["extra"], "model": u["model"], "stream": True}
-                    read = 180 if "GPU" in u["name"] else 60
-                    req = client.build_request("POST", f"{u['base']}/chat/completions", json=payload, headers=headers, timeout=httpx.Timeout(300, connect=15, read=read))
-                    try:
-                        r = await client.send(req, stream=True)
-                    except Exception as exc:  # noqa: BLE001
-                        errors.append(f"{u['name']}: {exc.__class__.__name__}")
-                        continue
-                    if r.status_code == 200:
-                        return u, r
-                    errors.append(f"{u['name']}: {r.status_code}")
-                    await r.aclose()
-                raise RuntimeError("; ".join(errors) or "no upstreams")
+                def trace(step, title, **detail):
+                    return ev(azaad_trace={"step": step, "title": title, "ms": int((time.time() - t0) * 1000), **detail})
 
-            async def events():
-                """Normalized chunks from the chosen upstream, reasoning stripped."""
-                u, r = await open_upstream()
-                meta = {"azaad_upstream": u["name"]}
-                if sources:
-                    meta["azaad_sources"] = sources
-                yield {"object": "chat.completion.chunk", "model": SERVED_NAME, "choices": [], **meta}
+                yield ev(azaad_meta={"tier": tier, "model": cfg["model"], "council": council})
+
+                # 0. Make sure a GPU worker is up; a cold boot takes a minute or two.
                 try:
+                    w = await workers()
+                    if not up(w):
+                        yield trace("wake", "Waking the model", detail="The GPU sleeps when no one is asking. First answer after a quiet spell takes a minute or two.")
+                        waker = asyncio.create_task(kick())
+                        for _ in range(100):
+                            await asyncio.sleep(3)
+                            w = await workers()
+                            if up(w):
+                                break
+                        waker.cancel()
+                        yield trace("wake", "Model is awake")
+                except Exception:  # noqa: BLE001
+                    pass  # health check unavailable; the calls below will wait in RunPod's queue
+
+                # 1. Plan
+                convo = "\n".join(f"{m['role'].upper()}: {m['content'][:600]}" for m in msgs[-5:])
+                scope = "the four core papers of Bunga Azaadi" if tier == "public" else "the whole Bunga Azaadi Vichaar Repository"
+                yield trace("plan", "Reading the question")
+                try:
+                    plan = json.loads(await complete(BASE_MODEL, [{"role": "user", "content": PLAN_PROMPT.format(scope=scope, convo=convo, n=cfg["queries"])}], PLAN_SCHEMA))
+                    queries = [q for q in plan.get("queries", []) if q.strip()][: cfg["queries"]] or [question]
+                    intent = plan.get("intent", "")
+                except Exception:  # noqa: BLE001
+                    queries, intent = [question], ""
+                users = [m["content"] for m in msgs if m["role"] == "user"]
+                queries = list(dict.fromkeys([" ".join(users[-2:])] + queries))
+                yield trace("plan", "Understood the question", intent=intent, queries=queries)
+
+                # 2. Search
+                ids, report = fuse(lib, queries, cfg["hits"])
+                yield trace("search", f"Searched {'the papers' if tier == 'public' else 'the repository'}", searches=report)
+
+                # 3. Reflect and search again (research tier)
+                if cfg["rounds"] > 1 and ids:
+                    found = "\n".join(f"- {lib.docs[lib.chunks[i][0]]['title']}: {lib.chunks[i][2][:140]}" for i in ids)
+                    try:
+                        gap = json.loads(await complete(BASE_MODEL, [{"role": "user", "content": REFLECT_PROMPT.format(question=question, found=found)}], REFLECT_SCHEMA))
+                    except Exception:  # noqa: BLE001
+                        gap = {"gaps": [], "queries": []}
+                    if gap.get("queries"):
+                        more, report2 = fuse(lib, gap["queries"][:3], 8, exclude=set(ids))
+                        ids += more
+                        yield trace("reflect", "Looked for what was missing", gaps=gap.get("gaps", []), searches=report2)
+
+                excerpts, sources = lib.excerpts(ids, cfg["budget"])
+                papers = list(dict.fromkeys(s["title"] for s in sources))
+                yield trace("read", f"Reading {len(sources)} passages from {len(papers)} {'documents' if len(papers) != 1 else 'document'}", documents=papers)
+                yield ev(azaad_sources=sources)
+
+                # 4. Answer, streaming the model's own reasoning first
+                system = f"{self.persona}\n\n{self.council if council else ''}\n\n## LIBRARY EXCERPTS\n\n{excerpts}"
+                payload = {
+                    "model": cfg["model"], "stream": True,
+                    "messages": [{"role": "system", "content": system}, *msgs],
+                    "max_tokens": min(int(body.get("max_tokens") or cfg["max_tokens"]), cfg["max_tokens"]),
+                    "temperature": float(body.get("temperature", 0.7)), "top_p": 0.95,
+                    "chat_template_kwargs": {"enable_thinking": True},
+                }
+                yield trace("reason", "Reasoning")
+                answering = False
+                async with client.stream("POST", f"{self.runpod}/openai/v1/chat/completions", json=payload, headers=auth) as r:
+                    if r.status_code != 200:
+                        raise RuntimeError(f"model returned {r.status_code}: {(await r.aread())[:300]!r}")
                     async for line in r.aiter_lines():
                         if not line.startswith("data:"):
                             continue
@@ -433,67 +313,43 @@ class Gateway:
                         if data == "[DONE]":
                             break
                         try:
-                            ev = json.loads(data)
+                            chunk = json.loads(data)
                         except ValueError:
                             continue
-                        for ch in ev.get("choices") or []:
-                            for k in ("reasoning", "reasoning_content", "reasoning_details"):
-                                (ch.get("delta") or {}).pop(k, None)
-                        ev["model"] = SERVED_NAME
-                        yield ev
-                finally:
-                    await r.aclose()
+                        delta = ((chunk.get("choices") or [{}])[0].get("delta") or {})
+                        if delta.get("content") and not answering:
+                            answering = True
+                            yield trace("answer", "Answering")
+                        chunk["model"] = cfg["model"]
+                        yield chunk
+                yield trace("done", "Done")
 
             if not body.get("stream", True):
-                text, meta = "", {}
+                text, reasoning, meta = "", "", {}
                 try:
-                    async for ev in events():
-                        meta.update({k: v for k, v in ev.items() if k.startswith("azaad_")})
-                        for ch in ev.get("choices") or []:
-                            text += (ch.get("delta") or {}).get("content") or ""
-                except RuntimeError as exc:
-                    return JSONResponse({"error": {"message": f"All upstreams failed: {exc}"}}, 502)
-                return {"object": "chat.completion", "model": SERVED_NAME, "choices": [{"index": 0, "message": {"role": "assistant", "content": text}, "finish_reason": "stop"}], **meta}
+                    async for e in run():
+                        for k, v in e.items():
+                            if k == "azaad_trace":
+                                meta.setdefault(k, []).append(v)
+                            elif k.startswith("azaad_"):
+                                meta[k] = v
+                        for ch in e.get("choices") or []:
+                            d = ch.get("delta") or {}
+                            text += d.get("content") or ""
+                            reasoning += d.get("reasoning_content") or d.get("reasoning") or ""
+                except Exception as exc:  # noqa: BLE001
+                    return JSONResponse({"error": {"message": f"Azaad is unavailable: {exc}"}}, 502)
+                return {"object": "chat.completion", "model": cfg["model"],
+                        "choices": [{"index": 0, "message": {"role": "assistant", "content": text, "reasoning_content": reasoning}, "finish_reason": "stop"}], **meta}
 
             async def stream():
                 try:
-                    async for ev in events():
-                        yield f"data: {json.dumps(ev)}\n\n"
-                except RuntimeError as exc:
-                    yield f"data: {json.dumps({'error': {'message': f'All upstreams failed: {exc}'}})}\n\n"
+                    async for e in run():
+                        yield f"data: {json.dumps(e)}\n\n"
+                except Exception as exc:  # noqa: BLE001
+                    yield f"data: {json.dumps({'error': {'message': f'Azaad is unavailable right now ({exc.__class__.__name__}). Try again in a minute.'}})}\n\n"
                 yield "data: [DONE]\n\n"
 
             return StreamingResponse(stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
         return api
-
-
-# ---------------------------------------------------------------------------
-# Optional: our own GPU model (deploy with AZAAD_GPU=1)
-# ---------------------------------------------------------------------------
-
-if USE_GPU:
-
-    @app.function(
-        image=gpu_image,
-        gpu="L4",
-        volumes={"/root/.cache/huggingface": hf_cache, "/root/.cache/vllm": vllm_cache},
-        scaledown_window=300,
-        timeout=900,
-        max_containers=1,  # caps spend: one GPU no matter the traffic
-    )
-    @modal.concurrent(max_inputs=24)
-    @modal.web_server(port=8000, startup_timeout=600)
-    def qwen():
-        subprocess.Popen([
-            "vllm", "serve", BASE_MODEL,
-            "--served-model-name", SERVED_NAME,
-            "--host", "0.0.0.0", "--port", "8000",
-            "--quantization", "fp8",
-            "--language-model-only",
-            "--max-model-len", str(MAX_LEN),
-            "--gpu-memory-utilization", "0.92",
-            "--enable-prefix-caching",
-            "--reasoning-parser", "qwen3",
-            "--speculative-config", json.dumps({"method": "qwen3_next_mtp", "num_speculative_tokens": 2}),
-        ])
