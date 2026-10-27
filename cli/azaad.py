@@ -32,7 +32,7 @@ import urllib.request
 from pathlib import Path
 
 VERSION = "2.0.0"
-GATEWAY = os.environ.get("AZAAD_URL", "https://sehajr-singhs--azaad-gateway-web.modal.run").rstrip("/")
+GATEWAY = os.environ.get("AZAAD_URL", "https://sehajr-singhs--azaad-gateway-web.us-east.modal.run").rstrip("/")
 HOME = Path(os.environ.get("AZAAD_HOME", Path.home() / ".azaad"))
 CONFIG = HOME / "config.json"
 

@@ -8,6 +8,7 @@ is ever written into this repo or the template in plain text.
 
 import json
 import os
+import urllib.error
 import urllib.request
 
 API = "https://rest.runpod.io/v1"
@@ -40,9 +41,12 @@ GPUS = ["NVIDIA L40S", "NVIDIA RTX 6000 Ada Generation", "NVIDIA L40", "NVIDIA H
 
 def call(method: str, path: str, body: dict | None = None):
     req = urllib.request.Request(API + path, data=json.dumps(body).encode() if body else None, method=method,
-                                 headers={"authorization": f"Bearer {KEY}", "content-type": "application/json"})
-    with urllib.request.urlopen(req) as r:
-        return json.loads(r.read() or b"null")
+                                 headers={"authorization": f"Bearer {KEY}", "content-type": "application/json", "user-agent": "azaad-deploy/1.0"})
+    try:
+        with urllib.request.urlopen(req) as r:
+            return json.loads(r.read() or b"null")
+    except urllib.error.HTTPError as e:
+        raise SystemExit(f"{method} {path}: {e.code} {e.read().decode()[:500]}") from None
 
 
 def main():
