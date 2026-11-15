@@ -141,7 +141,7 @@ export function Home({ route, onAsk, access, onAccess }: {
         ))}
         <div className="absolute inset-x-0 bottom-0 h-[55%] bg-gradient-to-t from-ink via-ink/80 to-transparent" />
         <div className="absolute inset-x-0 bottom-0 px-3 sm:px-4">
-          <h1 className="select-none text-[clamp(84px,17vw,260px)] font-bold leading-[0.8] tracking-tightest">Azaad.</h1>
+          <h1 className="select-none text-[clamp(84px,17vw,260px)] font-bold leading-[0.8] tracking-tightest">AzaadAI.</h1>
         </div>
       </div>
 
@@ -161,7 +161,7 @@ export function Home({ route, onAsk, access, onAccess }: {
               onChange={(e) => setQ(e.target.value)}
               placeholder="Ask about Khalsa Raaj, the Manifesto, the Pipeline…"
               className="min-w-0 flex-1 bg-transparent text-[17px] text-paper placeholder:text-paper/40 focus:outline-none"
-              aria-label="Ask Azaad"
+              aria-label="Ask AzaadAI"
             />
             <button type="submit" className="shrink-0 text-[13px] font-semibold text-paper/80 hover:text-paper">
               Ask ↵
@@ -180,20 +180,20 @@ export function Home({ route, onAsk, access, onAccess }: {
         label="The Model"
         side={
           <>
-            <a href="#/ask" className="ln">Ask Azaad</a>
+            <a href="#/ask" className="ln">Ask AzaadAI</a>
             <a href="#/terminal" className="ln">API & terminal</a>
           </>
         }
       >
         <div className="flex flex-col gap-4">
           <p>
-            Azaad is Gemma 4, a 31-billion-parameter open model, fine-tuned by Bunga Azaadi on its own work. For training, a teacher model worked through thousands of questions from newcomers, critics and practitioners, reading long stretches of the papers for each one and writing out its reasoning. Azaad learned to reason the way the papers do, not to recite them.
+            AzaadAI is Gemma 4, a 31-billion-parameter open model, fine-tuned by Bunga Azaadi on its own work. For training, a teacher model worked through thousands of questions from newcomers, critics and practitioners, reading long stretches of the papers for each one and writing out its reasoning. AzaadAI learned to reason the way the papers do, not to recite them.
           </p>
           <p>
-            Every question runs a line of research. Azaad restates what you are really asking, searches the papers from several angles, reads the passages, reasons through them, and answers with each claim cited to its source. You see every step, and every citation opens the original page.
+            Every question runs a line of research. AzaadAI restates what you are really asking, searches the papers from several angles, reads the passages, reasons through them, and answers with each claim cited to its source. You see every step, and every citation opens the original page.
           </p>
           <p>
-            This is the Azadist reading. Azaad does not offer its own interpretations of scripture; it speaks from the Institute's work.
+            This is the Azadist reading. AzaadAI does not offer its own interpretations of scripture; it speaks from the Institute's work.
           </p>
         </div>
       </Row>
@@ -258,7 +258,7 @@ export function Home({ route, onAsk, access, onAccess }: {
       >
         <div className="flex flex-col gap-4">
           <p>
-            The Swarm is in beta. Turn on <span className="font-semibold">Council</span> and Azaad convenes eight voices before it answers. Each holds a mandate and a known bias. They attack the proposition, answer their critics from the library, and refine it until no critique stands unanswered. You get the synthesis: where they agreed, where they split, the critical vulnerabilities, the strategic pivot and the counsel.
+            The Swarm is in beta. Turn on <span className="font-semibold">Council</span> and AzaadAI convenes eight voices before it answers. Each holds a mandate and a known bias. They attack the proposition, answer their critics from the library, and refine it until no critique stands unanswered. You get the synthesis: where they agreed, where they split, the critical vulnerabilities, the strategic pivot and the counsel.
           </p>
           <ul className="flex flex-col gap-2">
             {VOICES.map(([name, mandate, bias]) => (
@@ -285,7 +285,7 @@ export function Home({ route, onAsk, access, onAccess }: {
         }
       >
         <div className="flex flex-col gap-4">
-          <p>Azaad in your terminal, with the same line of research, citations and Council. One file, Python 3.9 or newer, no dependencies.</p>
+          <p>AzaadAI in your terminal, with the same line of research, citations and Council. One file, Python 3.9 or newer, no dependencies.</p>
           <div className="flex flex-col gap-2">
             <p className="text-[12px] font-semibold text-paper/60">Windows (PowerShell)</p>
             <Code>{`irm ${SITE}install.ps1 | iex`}</Code>

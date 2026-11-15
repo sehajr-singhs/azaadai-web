@@ -240,13 +240,15 @@ class Turn:
                 print(dim(f"    → {f}"))
         for g in t.get("gaps") or []:
             print(dim(f"  gap: {g}"))
+        if t["step"] == "check" and t.get("coverage") != "covered" and t.get("missing"):
+            print(sty("38;5;179", f"  not fully defined in the Azadist framework: {t['missing']}"))
         if t["step"] == "read":
+            if t.get("documents"):
+                print(dim(f"  papers ({len(t['documents'])}): " + " · ".join(t["documents"])))
             for p in (t.get("passages") or [])[:6]:
                 head = f" › {p['heading']}" if p.get("heading") else ""
                 print("  " + blue(f"[{p['n']}]") + f" {p['title']}" + dim(head))
                 print(dim("      " + textwrap.shorten(p["snippet"], width() - 8)))
-            if not t.get("passages") and t.get("documents"):
-                print(dim("  " + " · ".join(t["documents"][:6])))
         if t["step"] == "reason":
             self.in_reason = True
 
@@ -304,7 +306,7 @@ def persona() -> str:
             cache.write_text(urllib.request.urlopen(site, timeout=10).read().decode("utf-8"), encoding="utf-8")
         return cache.read_text(encoding="utf-8")
     except Exception:
-        return "You are Azaad, the model of Bunga Azaadi. Answer from the library excerpts and cite them inline as [n]."
+        return "You are AzaadAI, the model of Bunga Azaadi. Answer from the library excerpts and cite them inline as [n]."
 
 
 def run_azaad(messages, council, mode, code, turn: Turn):

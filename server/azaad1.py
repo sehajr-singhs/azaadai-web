@@ -1,4 +1,4 @@
-"""Azaad: Bunga Azaadi's model, served through a small gateway on Modal.
+"""AzaadAI: Bunga Azaadi's model, served through a small gateway on Modal.
 
 The model is Gemma 4 31B with LoRA adapters trained on the Institute's work,
 running on a RunPod Serverless GPU endpoint that scales to zero. This gateway
@@ -10,20 +10,25 @@ is the only thing that holds the RunPod key. It also:
     streams every step as a trace, alongside the model's own reasoning
   - checks access codes for the internal research tier
   - rate-limits
+  - logs every question (no names, no IPs) and has the model classify it in
+    the background, for the owner's private analytics page
 
     modal deploy server/azaad1.py
 
 Secrets (Modal):
   azaad-runpod   RUNPOD_API_KEY, RUNPOD_ENDPOINT_ID
   azaad-access   AZAAD_ACCESS_CODES = "group:code,group2:code2"
+  azaad-owner    AZAAD_OWNER_KEY (unlocks the research tier and /v1/admin/*), AZAAD_SALT
 """
 
 import asyncio
+import hashlib
 import hmac
 import json
 import os
 import re
 import time
+import uuid
 from collections import defaultdict
 from pathlib import Path
 
@@ -43,6 +48,7 @@ library_cache = modal.Volume.from_name("azaad1-library", create_if_missing=True)
 LIBRARY_FILE = Path("/library/docs.v2.json")
 
 app = modal.App("azaad")
+analytics = modal.Dict.from_name("azaadai-analytics", create_if_missing=True)
 
 PUBLIC_MODEL = "azaad"            # LoRA trained on the four core papers
 RESEARCH_MODEL = "azaad-research"  # LoRA trained on the whole repository
@@ -73,6 +79,68 @@ Return JSON only: {{"gaps": ["<what is still missing>", ...], "queries": ["<sear
 Name up to 3 gaps and up to 3 new queries to fill them. If coverage is already complete, return empty lists."""
 
 PLAN_SCHEMA = {"type": "object", "properties": {"intent": {"type": "string"}, "queries": {"type": "array", "items": {"type": "string"}}}, "required": ["intent", "queries"]}
+CATEGORIES = ["concept", "history", "economics", "governance-law", "sikhi-theology", "strategy-dharam-yudh",
+              "comparison-critique", "personal-application", "current-events", "about-azaadai", "off-topic"]
+
+CLASSIFY_PROMPT = """You classify questions people ask AzaadAI, Bunga Azaadi's model of the Azadist framework, so the Institute can see what people want to know.
+
+Question: {question}
+Earlier in the conversation: {context}
+Papers retrieved: {papers}
+Coverage check made before answering (from the passages alone): {verdict}
+Start of AzaadAI's answer: {answer}
+
+Return JSON only:
+- category: one of {cats}
+- topics: up to 4 short lowercase topic tags (e.g. "taxation", "sarbat khalsa", "khalistan")
+- stance: the asker's apparent stance: curious, supportive, skeptical, hostile or neutral
+- coverage: does Bunga Azaadi's own writing actually answer this? "covered", "partial" or "not-covered". Start from the coverage check; only override it if the answer clearly quotes the texts settling the question.
+- interest: 1 to 5. 5 = a question the Institute should read: a sharp objection, a gap in the framework, a new angle, a serious real-world application, or a sign of a new audience. 1 = routine or trivial.
+- why: one short line on why it is or isn't interesting
+- summary: the question restated in at most 12 words"""
+
+CLASSIFY_SCHEMA = {"type": "object", "properties": {
+    "category": {"type": "string", "enum": CATEGORIES},
+    "topics": {"type": "array", "items": {"type": "string"}},
+    "stance": {"type": "string", "enum": ["curious", "supportive", "skeptical", "hostile", "neutral"]},
+    "coverage": {"type": "string", "enum": ["covered", "partial", "not-covered"]},
+    "interest": {"type": "integer"},
+    "why": {"type": "string"},
+    "summary": {"type": "string"},
+}, "required": ["category", "topics", "stance", "coverage", "interest", "why", "summary"]}
+
+# Appended to the system prompt. The public model only has the four papers, so it
+# must say when something isn't defined there instead of implying it is.
+SCOPE_RULE = {
+    "public": """## SCOPE (public model)
+The excerpts above come from the four core papers, and they are all you have. The framework does not define everything.
+- If the question, or part of it, isn't defined in these papers, say so plainly before you answer that part, for example: "This isn't fully defined in the Azadist framework." or "The core papers don't address this directly."
+- You may then reason from Azadist principles, but label it as your own extension ("Reasoning from the principles rather than the texts: ..."), never as the Institute's position.
+- Never cite a passage for a claim it doesn't make, and never imply the framework already has a settled answer to everything.""",
+    "research": """## SCOPE (research model)
+If the repository doesn't define something, say so plainly ("The repository doesn't settle this.") before reasoning from principles, and label that reasoning as your own extension.""",
+}
+
+COVER_PROMPT = """You are a strict checker for Bunga Azaadi. Decide whether the PASSAGES below, taken from {scope}, themselves answer the question. Ignore what a clever reader could extrapolate from general principles.
+
+Question: {question}
+
+PASSAGES:
+{excerpts}
+
+Judge the TOPIC, not the format of the request. Requests to explain, summarise, walk through, steelman, critique, compare or apply a topic are "covered" when the passages discuss that topic; the format itself is never what is missing.
+
+Return JSON only:
+- coverage: "covered" if the passages discuss this topic and state a position on it; "partial" if a substantive part of the topic is not discussed, or the passages give only a general principle that the answer would have to extend to reach this topic; "not-covered" if the topic itself is not discussed
+- missing: the part of the topic the texts do not define, as a noun phrase of at most 10 words (e.g. "a position on abortion"), or "" if covered
+- defined: what the texts do define that bears on it, at most 12 words, or "" if nothing"""
+
+COVER_SCHEMA = {"type": "object", "properties": {
+    "coverage": {"type": "string", "enum": ["covered", "partial", "not-covered"]},
+    "missing": {"type": "string"},
+    "defined": {"type": "string"},
+}, "required": ["coverage", "missing", "defined"]}
+
 REFLECT_SCHEMA = {"type": "object", "properties": {"gaps": {"type": "array", "items": {"type": "string"}}, "queries": {"type": "array", "items": {"type": "string"}}}, "required": ["gaps", "queries"]}
 
 
@@ -94,7 +162,7 @@ def fuse(lib: L.Library, queries: list[str], k: int, per_query: int = 8, exclude
     return ids, report
 
 
-@app.cls(image=image, secrets=[modal.Secret.from_name("azaad-runpod"), modal.Secret.from_name("azaad-access")],
+@app.cls(image=image, secrets=[modal.Secret.from_name("azaad-runpod"), modal.Secret.from_name("azaad-access"), modal.Secret.from_name("azaad-owner")],
          volumes={"/library": library_cache}, cpu=1.0, memory=1536, scaledown_window=900, timeout=900, max_containers=2)
 @modal.concurrent(max_inputs=64)
 class Gateway:
@@ -114,11 +182,19 @@ class Gateway:
                 self.codes[code.strip()] = group.strip()
         self.runpod = f"https://api.runpod.ai/v2/{os.environ['RUNPOD_ENDPOINT_ID']}"
         self.key = os.environ["RUNPOD_API_KEY"]
+        self.owner = os.environ.get("AZAAD_OWNER_KEY", "")
+        self.salt = os.environ.get("AZAAD_SALT", "azaadai")
         self.last_use = 0.0
+        self.tasks: set = set()
+
+    def _is_owner(self, key: str | None) -> bool:
+        return bool(self.owner and key and hmac.compare_digest(self.owner.encode(), key.strip().encode()))
 
     def _group(self, code: str | None) -> str | None:
         if not code:
             return None
+        if self._is_owner(code):
+            return "owner"
         for known, group in self.codes.items():
             if hmac.compare_digest(known.encode(), code.strip().encode()):
                 return group
@@ -138,7 +214,7 @@ class Gateway:
         from fastapi.middleware.cors import CORSMiddleware
         from fastapi.responses import JSONResponse, StreamingResponse
 
-        api = FastAPI(title="Azaad", version="2.0")
+        api = FastAPI(title="AzaadAI", version="2.1")
         api.add_middleware(CORSMiddleware, allow_origins=ALLOWED_ORIGINS, allow_origin_regex=r"https://.*\.github\.io",
                            allow_methods=["GET", "POST", "OPTIONS"], allow_headers=["*"])
         client = httpx.AsyncClient(timeout=httpx.Timeout(600, connect=20))
@@ -166,6 +242,41 @@ class Gateway:
                 await complete(PUBLIC_MODEL, [{"role": "user", "content": "Sat Sri Akaal"}], max_tokens=1)
             except Exception:  # noqa: BLE001
                 pass
+
+        def spawn(coro):
+            t = asyncio.create_task(coro)
+            self.tasks.add(t)
+            t.add_done_callback(self.tasks.discard)
+
+        def visitor(request: Request) -> str:
+            """A per-day pseudonym. The raw IP is never stored."""
+            ip = request.headers.get("x-forwarded-for", request.client.host if request.client else "?").split(",")[0].strip()
+            day = time.strftime("%Y-%m-%d", time.gmtime())
+            return hashlib.sha256(f"{self.salt}|{ip}|{day}".encode()).hexdigest()[:12]
+
+        async def record(rec: dict):
+            """Store the question, then have the model classify it. Runs after the answer, off the hot path."""
+            key = rec["id"]
+            try:
+                await analytics.put.aio(key, rec)
+            except Exception as exc:  # noqa: BLE001
+                print("analytics put failed", exc)
+                return
+            if not rec.get("answer_head"):
+                return
+            try:
+                raw = await complete(BASE_MODEL, [{"role": "user", "content": CLASSIFY_PROMPT.format(
+                    question=rec["question"][:1500], context=rec.get("context", "")[:600] or "(none)",
+                    papers=", ".join(rec.get("papers", [])[:10]) or "(none)", answer=rec.get("answer_head", "")[:1500],
+                    verdict=json.dumps(rec.get("scope") or {}),
+                    cats=", ".join(CATEGORIES))}], CLASSIFY_SCHEMA, max_tokens=300)
+                c = json.loads(raw)
+                c["interest"] = max(1, min(5, int(c.get("interest", 1))))
+                c["topics"] = [t.strip().lower() for t in c.get("topics", []) if t.strip()][:4]
+                rec["cls"] = c
+                await analytics.put.aio(key, rec)
+            except Exception as exc:  # noqa: BLE001
+                print("classify failed", exc.__class__.__name__, exc)
 
         def tier_of(request: Request, body: dict | None = None) -> tuple[str, str | None]:
             group = self._group(request.headers.get("x-azaad-access"))
@@ -211,6 +322,54 @@ class Gateway:
         async def models():
             return {"object": "list", "data": [{"id": m, "object": "model", "created": 0, "owned_by": "bunga-azaadi"} for m in (PUBLIC_MODEL, RESEARCH_MODEL)]}
 
+        @api.get("/v1/library")
+        async def library(request: Request):
+            """Every document this tier can draw on, so readers can see the whole shelf."""
+            tier, _ = tier_of(request)
+            lib = self.libs[tier]
+            counts: dict[int, int] = defaultdict(int)
+            for d, _h, _b in lib.chunks:
+                counts[d] += 1
+            docs = [{"title": d["title"], "url": d["url"], "core": d["core"], "paper": d["paper"], "path": d["path"], "sections": counts[i]}
+                    for i, d in enumerate(lib.docs)]
+            return {"tier": tier, "count": len(docs), "docs": docs}
+
+        def owner_only(request: Request):
+            if not self._is_owner(request.headers.get("x-azaad-owner")):
+                return JSONResponse({"error": {"message": "Owner key required."}}, 403)
+            return None
+
+        @api.get("/v1/admin/analytics")
+        async def admin_analytics(request: Request, days: int = 90):
+            if (deny := owner_only(request)) is not None:
+                return deny
+            cutoff = time.time() - days * 86400 if days > 0 else 0
+            rows = []
+            async for _k, v in analytics.items.aio():
+                if isinstance(v, dict) and v.get("ts", 0) >= cutoff:
+                    rows.append(v)
+            rows.sort(key=lambda r: r.get("ts", 0), reverse=True)
+            return {"count": len(rows), "rows": rows[:5000]}
+
+        @api.post("/v1/admin/mark")
+        async def admin_mark(request: Request):
+            if (deny := owner_only(request)) is not None:
+                return deny
+            body = await request.json()
+            key = str(body.get("id", ""))
+            rec = await analytics.get.aio(key)
+            if not rec:
+                return JSONResponse({"error": {"message": "Not found."}}, 404)
+            if body.get("delete"):
+                await analytics.pop.aio(key)
+                return {"ok": True, "deleted": True}
+            if "starred" in body:
+                rec["starred"] = bool(body["starred"])
+            if "note" in body:
+                rec["note"] = str(body["note"])[:1000]
+            await analytics.put.aio(key, rec)
+            return {"ok": True, "row": rec}
+
         @api.get("/v1/library/search")
         async def search(request: Request, q: str, k: int = 8):
             tier, _ = tier_of(request)
@@ -234,6 +393,13 @@ class Gateway:
             question = msgs[-1]["content"]
             lib = self.libs[tier]
             self.last_use = time.time()
+
+            rec = {"id": f"{int(time.time() * 1000):013d}-{uuid.uuid4().hex[:6]}", "ts": time.time(), "tier": tier,
+                   "owner": group == "owner", "group": group if group and group != "owner" else None, "council": council,
+                   "question": question[:4000], "turn": sum(1 for m in msgs if m["role"] == "user"),
+                   "context": " | ".join(m["content"][:200] for m in msgs[:-1] if m["role"] == "user")[-600:],
+                   "visitor": visitor(request), "papers": [], "sources": 0, "src": []}
+            state = {"answer": "", "first": None, "error": None, "done": False}
 
             async def run():
                 t0 = time.time()
@@ -294,6 +460,8 @@ class Gateway:
 
                 excerpts, sources = lib.excerpts(ids, cfg["budget"])
                 papers = list(dict.fromkeys(s["title"] for s in sources))
+                rec["papers"], rec["sources"] = papers, len(sources)
+                rec["src"] = [{"n": s["n"], "title": s["title"]} for s in sources]
                 passages = []
                 for src, i in zip(sources, ids):
                     snippet = re.sub(r"\s+", " ", lib.chunks[i][2]).strip()
@@ -301,8 +469,31 @@ class Gateway:
                 yield trace("read", f"Reading {len(sources)} passages from {len(papers)} {'documents' if len(papers) != 1 else 'document'}", documents=papers, passages=passages)
                 yield ev(azaad_sources=sources)
 
+                # 3b. Check, from the passages alone, whether the texts actually settle this.
+                scope_note = ""
+                try:
+                    verdict = json.loads(await complete(BASE_MODEL, [{"role": "user", "content": COVER_PROMPT.format(
+                        scope=scope, question=" ".join(users[-2:])[:1500], excerpts=excerpts[:10000])}], COVER_SCHEMA, max_tokens=400))
+                    cov = verdict.get("coverage", "covered")
+                except Exception as exc:  # noqa: BLE001
+                    print("coverage check failed", exc.__class__.__name__, exc)
+                    verdict, cov = {}, "covered"
+                if verdict:
+                    verdict["framework"] = "the four core papers" if tier == "public" else "the Vichaar Repository"
+                    rec["scope"] = verdict
+                    label = {"covered": "The texts address this", "partial": "The texts only partly settle this", "not-covered": "The texts don't address this"}[cov]
+                    yield trace("check", label, coverage=cov, missing=verdict.get("missing", ""), defined=verdict.get("defined", ""))
+                    if cov != "covered":
+                        yield ev(azaad_scope=verdict)
+                        gap = verdict.get("missing") or "this"
+                        scope_note = (f"\n\n## COVERAGE CHECK (binding)\nA check of the passages found that {verdict['framework']} "
+                                      f"{'do not define' if cov == 'not-covered' else 'only partly define'} {gap}. "
+                                      f"Open your answer with one plain sentence saying {gap} isn't fully defined in the Azadist framework. "
+                                      "After that, anything you add beyond the passages must be labelled as your own reasoning from Azadist principles, "
+                                      "not as the Institute's position. Do not write \"Azadism says\" or \"the Azadist position is\" about anything the passages don't state.")
+
                 # 4. Answer, streaming the model's own reasoning first
-                system = f"{self.persona}\n\n{self.council if council else ''}\n\n## LIBRARY EXCERPTS\n\n{excerpts}"
+                system = f"{self.persona}\n\n{self.council if council else ''}\n\n## LIBRARY EXCERPTS\n\n{excerpts}\n\n{SCOPE_RULE[tier]}{scope_note}"
                 payload = {
                     "model": cfg["model"], "stream": True,
                     "messages": [{"role": "system", "content": system}, *msgs],
@@ -328,10 +519,28 @@ class Gateway:
                         delta = ((chunk.get("choices") or [{}])[0].get("delta") or {})
                         if delta.get("content") and not answering:
                             answering = True
+                            state["first"] = time.time() - t0
                             yield trace("answer", "Answering")
+                        if delta.get("content"):
+                            state["answer"] += delta["content"]
                         chunk["model"] = cfg["model"]
                         yield chunk
                 yield trace("done", "Done")
+
+            def finish():
+                if state["done"]:
+                    return
+                state["done"] = True
+                rec["ms"] = int((time.time() - rec["ts"]) * 1000)
+                rec["ms_first"] = int(state["first"] * 1000) if state["first"] else None
+                ans = state["answer"]
+                rec["answer_chars"] = len(ans)
+                rec["answer_head"] = ans[:2000]
+                rec["cited"] = sorted({int(n) for g in re.findall(r"\[(\d+(?:\s*[,;]\s*\d+)*)\]", ans) for n in re.split(r"[,;]", g) if n.strip().isdigit()})
+                rec["cited_papers"] = list(dict.fromkeys(s["title"] for s in rec["src"] if s["n"] in rec["cited"]))
+                rec["error"] = state["error"]
+                rec["aborted"] = not ans and not state["error"]
+                spawn(record(rec))
 
             if not body.get("stream", True):
                 text, reasoning, meta = "", "", {}
@@ -347,7 +556,10 @@ class Gateway:
                             text += d.get("content") or ""
                             reasoning += d.get("reasoning_content") or d.get("reasoning") or ""
                 except Exception as exc:  # noqa: BLE001
-                    return JSONResponse({"error": {"message": f"Azaad is unavailable: {exc}"}}, 502)
+                    state["error"] = exc.__class__.__name__
+                    finish()
+                    return JSONResponse({"error": {"message": f"AzaadAI is unavailable: {exc}"}}, 502)
+                finish()
                 return {"object": "chat.completion", "model": cfg["model"],
                         "choices": [{"index": 0, "message": {"role": "assistant", "content": text, "reasoning_content": reasoning}, "finish_reason": "stop"}], **meta}
 
@@ -359,7 +571,10 @@ class Gateway:
                     import traceback
 
                     traceback.print_exc()
-                    yield f"data: {json.dumps({'error': {'message': f'Azaad is unavailable right now ({exc.__class__.__name__}). Try again in a minute.'}})}\n\n"
+                    state["error"] = exc.__class__.__name__
+                    yield f"data: {json.dumps({'error': {'message': f'AzaadAI is unavailable right now ({exc.__class__.__name__}). Try again in a minute.'}})}\n\n"
+                finally:
+                    finish()  # also runs when the reader disconnects mid-answer
                 yield "data: [DONE]\n\n"
 
             return StreamingResponse(stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})

@@ -52,9 +52,9 @@ export function Header({ route, solid = false }: { route: string; solid?: boolea
   return (
     <header className={`fixed inset-x-0 top-0 z-30 ${solid ? "border-b border-ash-3 bg-ink" : "bg-gradient-to-b from-ink/70 to-transparent"}`}>
       <div className="flex h-14 items-center justify-between px-4 sm:px-5">
-        <a href="#/" className="flex items-center gap-2.5" aria-label="Azaad home">
+        <a href="#/" className="flex items-center gap-2.5" aria-label="AzaadAI home">
           <Dome className="h-[22px] text-paper" />
-          <span className="text-[15px] font-semibold tracking-[-0.02em]">Azaad</span>
+          <span className="text-[15px] font-semibold tracking-[-0.02em]">AzaadAI</span>
         </a>
         <nav className="flex items-center gap-4 text-[13px] font-medium sm:gap-6">
           {nav.map(([href, label]) => (

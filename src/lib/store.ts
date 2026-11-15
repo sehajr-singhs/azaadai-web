@@ -1,4 +1,4 @@
-import type { Source, TraceStep } from "./api";
+import type { Scope, Source, TraceStep } from "./api";
 import type { ProviderId } from "./providers";
 
 export interface Turn {
@@ -8,6 +8,7 @@ export interface Turn {
   reasoning: string;
   trace: TraceStep[];
   sources: Source[];
+  scope?: Scope;
   tier: "public" | "research" | "byok";
   model: string;
   council: boolean;

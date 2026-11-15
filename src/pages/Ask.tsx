@@ -5,7 +5,7 @@ import persona from "../../prompts/azaad.md?raw";
 import council from "../../prompts/council.md?raw";
 import { Arrow, Dome, Header } from "../components/brand";
 import { Internal } from "../components/Internal";
-import { search, status, streamAzaad, warm, type ChatMsg, type Source, type TraceStep } from "../lib/api";
+import { libraryList, search, status, streamAzaad, warm, type ChatMsg, type LibraryList, type Source, type TraceStep } from "../lib/api";
 import { PROVIDERS, provider, streamByok, type ProviderId } from "../lib/providers";
 import { loadConversations, loadKey, saveConversations, saveKey, uid, type Conversation, type Settings, type Turn } from "../lib/store";
 
@@ -145,13 +145,21 @@ function StepDetail({ s, turn, live }: { s: TraceStep; turn: Turn; live: boolean
         </div>
       );
     case "read":
-      return s.passages?.length ? <Passages list={s.passages} /> : (
-        <ul className="mt-1 flex flex-col gap-0.5 text-[11.5px] text-paper/55">
-          {s.documents?.slice(0, 8).map((d) => (
-            <li key={d}>{d}</li>
-          ))}
-        </ul>
+      return (
+        <>
+          {s.documents?.length ? <Papers docs={s.documents} passages={s.passages} sources={turn.sources} /> : null}
+          {s.passages?.length ? <Passages list={s.passages} /> : null}
+        </>
       );
+    case "check":
+      return s.coverage && s.coverage !== "covered" ? (
+        <p className="mt-1 text-[12px] leading-[1.45] text-[#d4a64a]">
+          Not defined: {s.missing}
+          {s.defined && <span className="block text-paper/55">Defined: {s.defined}</span>}
+        </p>
+      ) : s.defined ? (
+        <p className="mt-1 text-[12px] leading-[1.45] text-paper/55">{s.defined}</p>
+      ) : null;
     case "reason":
       return turn.reasoning ? (
         <div className="mt-1.5">
@@ -161,6 +169,75 @@ function StepDetail({ s, turn, live }: { s: TraceStep; turn: Turn; live: boolean
     default:
       return null;
   }
+}
+
+// Every paper the model drew on for this answer, with how many passages came from each.
+function Papers({ docs, passages, sources }: { docs: string[]; passages?: TraceStep["passages"]; sources: Source[] }) {
+  const count = (d: string) => passages?.filter((p) => p.title === d).length ?? 0;
+  const url = (d: string) => sources.find((s) => s.title === d)?.url;
+  return (
+    <div className="mt-1.5">
+      <p className="mb-1 font-mono text-[10px] uppercase tracking-[0.08em] text-paper/40">Papers referenced · {docs.length}</p>
+      <ul className="flex flex-col gap-0.5 text-[11.5px] leading-[1.4] text-paper/70">
+        {docs.map((d) => (
+          <li key={d} className="flex justify-between gap-2">
+            {url(d) ? (
+              <a href={url(d)} target="_blank" rel="noreferrer" className="min-w-0 hover:text-paper hover:underline">
+                {d}
+              </a>
+            ) : (
+              <span className="min-w-0">{d}</span>
+            )}
+            {count(d) > 0 && <span className="shrink-0 font-mono text-[10.5px] text-paper/40">{count(d)}</span>}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+// The whole shelf this tier can draw on.
+function LibraryPanel({ code }: { code?: string }) {
+  const [lib, setLib] = useState<LibraryList | null>(null);
+  const [err, setErr] = useState("");
+  const [q, setQ] = useState("");
+  useEffect(() => {
+    libraryList(code).then(setLib, (e) => setErr((e as Error).message));
+  }, [code]);
+  if (err) return <p className="text-[13px] text-[#ff8a8a]">{err}</p>;
+  if (!lib) return <p className="text-[13px] text-paper/50">Loading the library…</p>;
+  const shown = lib.docs.filter((d) => !q || `${d.title} ${d.path}`.toLowerCase().includes(q.toLowerCase()));
+  const core = shown.filter((d) => d.core);
+  const rest = shown.filter((d) => !d.core);
+  const group = (title: string, list: LibraryList["docs"]) =>
+    list.length > 0 && (
+      <div className="flex flex-col gap-1">
+        <p className="label text-paper/50">{title} · {list.length}</p>
+        <ul className="flex flex-col gap-1 text-[13px]">
+          {list.map((d) => (
+            <li key={d.path} className="flex justify-between gap-3">
+              <a href={d.url} target="_blank" rel="noreferrer" className="min-w-0 text-paper/85 hover:text-paper hover:underline">
+                {d.title}
+                <span className="block truncate text-[11px] text-paper/40">{d.path.replace(/\.md$/, "").split("/").slice(0, -1).join(" › ")}</span>
+              </a>
+              <span className="shrink-0 font-mono text-[11px] text-paper/40">{d.sections}</span>
+            </li>
+          ))}
+        </ul>
+      </div>
+    );
+  return (
+    <div className="flex flex-col gap-5">
+      <p className="text-[13px] text-paper/60">
+        {lib.tier === "research" ? `The research model searches all ${lib.count} documents in the Vichaar Repository.` : `The public model answers only from these ${lib.count} documents, the four core papers.`} The number is how many sections each one is split into for search.
+      </p>
+      <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Filter by title" className="w-full rounded-[4px] border border-ash-3 bg-ink px-3 py-2 text-[13.5px] text-paper placeholder:text-paper/30 focus:border-paper/60 focus:outline-none" />
+      <div className="flex max-h-[60vh] flex-col gap-6 overflow-y-auto pr-1">
+        {group("Core papers", core)}
+        {group("Rest of the repository", rest)}
+      </div>
+    </div>
+  );
 }
 
 function Passages({ list }: { list: NonNullable<TraceStep["passages"]> }) {
@@ -239,6 +316,14 @@ function Exchange({ turn, onRetry }: { turn: Turn; onRetry: () => void }) {
           {turn.ms && <span>· {(turn.ms / 1000).toFixed(1)}s</span>}
         </p>
         <h2 className="mb-6 text-[24px] font-semibold leading-[1.2] tracking-[-0.02em] md:text-[28px]">{turn.q}</h2>
+        {turn.scope && turn.scope.coverage !== "covered" && (
+          <div className="mb-6 border-l-2 border-[#d4a64a] pl-3 text-[13.5px] leading-[1.5] text-paper/80">
+            <p className="font-semibold text-[#d4a64a]">{turn.scope.coverage === "not-covered" ? "Not defined in the Azadist framework" : "Not fully defined in the Azadist framework"}</p>
+            <p>
+              {turn.scope.framework.charAt(0).toUpperCase() + turn.scope.framework.slice(1)} {turn.scope.coverage === "not-covered" ? "don't address" : "don't fully settle"} {turn.scope.missing || "this question"}. Where AzaadAI goes further, it is reasoning from Azadist principles, not stating the Institute's position.
+            </p>
+          </div>
+        )}
         {turn.answer ? (
           <Answer text={turn.answer} sources={turn.sources} live={running} />
         ) : running ? (
@@ -325,7 +410,7 @@ function SettingsPanel({ settings, setSettings, access, onAccess, onClear }: {
             className={`col-span-2 rounded-[4px] border px-3 py-2.5 text-left ${engine === "azaad" ? "border-paper bg-paper/[0.06]" : "border-ash-3 hover:border-ash-4"}`}
           >
             <span className="flex items-center gap-2 font-semibold">
-              <Dome className="h-3.5" /> Azaad
+              <Dome className="h-3.5" /> AzaadAI
             </span>
             <span className="mt-0.5 block text-[12.5px] text-paper/60">Bunga Azaadi's own model. Free, no key, shows its line of research.</span>
           </button>
@@ -340,7 +425,7 @@ function SettingsPanel({ settings, setSettings, access, onAccess, onClear }: {
             </button>
           ))}
         </div>
-        {p && <p className="text-[12px] text-paper/50">Your own model answers; Azaad still supplies the passages from the library. Keys stay in this browser and go only to {p.label}.</p>}
+        {p && <p className="text-[12px] text-paper/50">Your own model answers; AzaadAI still supplies the passages from the library. Keys stay in this browser and go only to {p.label}.</p>}
       </div>
 
       {p && (
@@ -403,7 +488,7 @@ function SettingsPanel({ settings, setSettings, access, onAccess, onClear }: {
       </div>
 
       <div className="flex items-center justify-between border-t border-ash-3 pt-4 text-[12px] text-paper/50">
-        <span>Conversations are stored only in this browser.</span>
+        <span>Your history stays in this browser. Questions are logged without names or IPs so Bunga Azaadi can see what people ask.</span>
         <button type="button" onClick={onClear} className="hover:text-[#ff8a8a]">
           Clear history
         </button>
@@ -431,6 +516,7 @@ export function Ask({ route, settings, setSettings, access, onAccess, pending, c
   const [busy, setBusy] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
+  const [showLibrary, setShowLibrary] = useState(false);
   const [waking, setWaking] = useState<"" | "waking" | "warm">("");
   const abortRef = useRef<AbortController | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
@@ -438,7 +524,7 @@ export function Ask({ route, settings, setSettings, access, onAccess, pending, c
 
   const active = convos.find((c) => c.id === activeId);
   const research = Boolean(access.code) && settings.research;
-  const engineLabel = settings.engine === "azaad" ? `Azaad · ${research ? "Research" : "Public"}` : `${provider(settings.engine).label} · ${settings.models[settings.engine] || provider(settings.engine).placeholder}`;
+  const engineLabel = settings.engine === "azaad" ? `AzaadAI · ${research ? "Research" : "Public"}` : `${provider(settings.engine).label} · ${settings.models[settings.engine] || provider(settings.engine).placeholder}`;
 
   useEffect(() => {
     saveConversations(convos);
@@ -537,6 +623,7 @@ export function Ask({ route, settings, setSettings, access, onAccess, pending, c
             {
               onTrace: (s) => patchTurn(cid, turn.id, (t) => ({ ...t, trace: [...t.trace, s] })),
               onSources: (s) => patchTurn(cid, turn.id, (t) => ({ ...t, sources: s })),
+              onScope: (s) => patchTurn(cid, turn.id, (t) => ({ ...t, scope: s })),
               onReasoning: (r) => {
                 rsn += r;
                 queue();
@@ -582,7 +669,7 @@ export function Ask({ route, settings, setSettings, access, onAccess, pending, c
         flush();
         const aborted = (e as Error).name === "AbortError";
         let msg = (e as Error).message;
-        if (!aborted && /Failed to fetch|NetworkError/i.test(msg)) msg = byok ? "Couldn't reach the provider. Check the key, the model name and, for local servers, CORS." : "Couldn't reach Azaad. Check your connection and try again.";
+        if (!aborted && /Failed to fetch|NetworkError/i.test(msg)) msg = byok ? "Couldn't reach the provider. Check the key, the model name and, for local servers, CORS." : "Couldn't reach AzaadAI. Check your connection and try again.";
         patchTurn(cid, turn.id, (t) => ({ ...t, status: aborted ? "stopped" : "error", error: aborted ? undefined : msg }));
       } finally {
         setBusy(false);
@@ -676,11 +763,11 @@ export function Ask({ route, settings, setSettings, access, onAccess, pending, c
             ) : (
               <div className="mx-auto flex max-w-[680px] flex-col gap-8 py-16 md:py-24">
                 <Dome className="h-10 w-fit text-paper" />
-                <h1 className="text-[44px] font-bold leading-[0.95] tracking-tightest md:text-[64px]">Ask Azaad.</h1>
+                <h1 className="text-[44px] font-bold leading-[0.95] tracking-tightest md:text-[64px]">Ask AzaadAI.</h1>
                 <p className="max-w-[520px] text-[15px] leading-[1.5] text-paper/70">
                   {research
-                    ? `Research access for ${access.group}. Azaad searches the whole Vichaar Repository, checks its coverage, and searches again before it answers.`
-                    : "Azaad answers from Bunga Azaadi's four papers. You'll see its line of research as it works, and every claim is cited to its source."}
+                    ? `Research access for ${access.group}. AzaadAI searches the whole Vichaar Repository, checks its coverage, and searches again before it answers.`
+                    : "AzaadAI answers from Bunga Azaadi's four papers. You'll see its line of research as it works, and every claim is cited to its source."}
                 </p>
                 <ul className="flex flex-col gap-2.5 text-[15px]">
                   {SUGGESTIONS.map((s) => (
@@ -703,7 +790,7 @@ export function Ask({ route, settings, setSettings, access, onAccess, pending, c
               {waking === "waking" && settings.engine === "azaad" && (
                 <p className="mb-2 flex items-center gap-2 text-[12px] text-paper/55">
                   <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-blue" />
-                  Waking Azaad's GPU. The first answer after a quiet spell takes about a minute.
+                  Waking AzaadAI's GPU. The first answer after a quiet spell takes about a minute.
                 </p>
               )}
               <form
@@ -755,14 +842,25 @@ export function Ask({ route, settings, setSettings, access, onAccess, pending, c
                     History
                   </button>
                 </div>
-                <button type="button" onClick={() => setShowSettings(true)} className="hover:text-paper">
-                  {engineLabel}
-                </button>
+                <div className="flex items-center gap-4">
+                  <button type="button" onClick={() => setShowLibrary(true)} className="hover:text-paper">
+                    Library
+                  </button>
+                  <button type="button" onClick={() => setShowSettings(true)} className="hover:text-paper">
+                    {engineLabel}
+                  </button>
+                </div>
               </div>
             </div>
           </div>
         </main>
       </div>
+
+      {showLibrary && (
+        <Modal title={research ? "The Vichaar Repository" : "The four papers"} onClose={() => setShowLibrary(false)}>
+          <LibraryPanel code={research ? access.code : undefined} />
+        </Modal>
+      )}
 
       {showSettings && (
         <Modal title="Settings" onClose={() => setShowSettings(false)}>

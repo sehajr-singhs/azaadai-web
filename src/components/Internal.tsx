@@ -30,7 +30,7 @@ export function Internal({ access, onAccess, compact = false }: {
     <div className="flex flex-col gap-4">
       {!compact && (
         <p>
-          With an access code, Azaad switches to its research model. It is trained on the whole Vichaar Repository, not just the four papers, and it searches all of it. Before answering it checks its own coverage for gaps, searches again, and writes at greater length.
+          With an access code, AzaadAI switches to its research model. It is trained on the whole Vichaar Repository, not just the four papers, and it searches all of it. Before answering it checks its own coverage for gaps, searches again, and writes at greater length.
         </p>
       )}
       {access.group ? (

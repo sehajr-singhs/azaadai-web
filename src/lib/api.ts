@@ -1,4 +1,4 @@
-// Client for the Azaad gateway. The gateway holds the RunPod key, the library
+// Client for the AzaadAI gateway. The gateway holds the RunPod key, the library
 // index and the access codes; the browser only ever talks to it.
 
 export const GATEWAY: string = (import.meta.env.VITE_AZAAD_URL ?? "").replace(/\/$/, "");
@@ -12,6 +12,14 @@ export interface Source {
   paper: string | null;
 }
 
+// Set when a check of the retrieved passages finds the texts don't fully settle the question.
+export interface Scope {
+  coverage: "covered" | "partial" | "not-covered";
+  missing: string;
+  defined: string;
+  framework: string;
+}
+
 export interface TraceStep {
   step: "plan" | "search" | "reflect" | "read" | "reason" | "answer" | "done" | string;
   title: string;
@@ -23,6 +31,9 @@ export interface TraceStep {
   documents?: string[];
   detail?: string;
   passages?: { n: number; title: string; heading: string; snippet: string }[];
+  coverage?: Scope["coverage"];
+  missing?: string;
+  defined?: string;
 }
 
 export interface ChatMsg {
@@ -34,6 +45,7 @@ export interface StreamHandlers {
   onMeta?: (m: { tier: string; model: string; council: boolean }) => void;
   onTrace?: (t: TraceStep) => void;
   onSources?: (s: Source[]) => void;
+  onScope?: (s: Scope) => void;
   onReasoning?: (t: string) => void;
   onToken?: (t: string) => void;
 }
@@ -85,6 +97,18 @@ export async function unlock(code: string): Promise<{ group: string }> {
   return r.json();
 }
 
+export interface LibraryList {
+  tier: string;
+  count: number;
+  docs: { title: string; url: string; core: boolean; paper: string | null; path: string; sections: number }[];
+}
+
+export async function libraryList(code?: string): Promise<LibraryList> {
+  const r = await fetch(`${GATEWAY}/v1/library`, { headers: headers(code) });
+  if (!r.ok) throw new Error(await errorText(r));
+  return r.json();
+}
+
 export async function search(q: string, code?: string, k = 10): Promise<{ tier: string; sources: Source[]; excerpts: string }> {
   const r = await fetch(`${GATEWAY}/v1/library/search?q=${encodeURIComponent(q)}&k=${k}`, { headers: headers(code) });
   if (!r.ok) throw new Error(await errorText(r));
@@ -95,7 +119,7 @@ export async function streamAzaad(
   args: { messages: ChatMsg[]; council: boolean; mode: "public" | "research"; code?: string; signal: AbortSignal },
   h: StreamHandlers,
 ) {
-  if (!GATEWAY) throw new Error("This build isn't connected to the Azaad gateway.");
+  if (!GATEWAY) throw new Error("This build isn't connected to the AzaadAI gateway.");
   const resp = await fetch(`${GATEWAY}/v1/chat/completions`, {
     method: "POST",
     signal: args.signal,
@@ -110,6 +134,7 @@ export async function streamAzaad(
     if (ev.azaad_meta) h.onMeta?.(ev.azaad_meta);
     if (ev.azaad_trace) h.onTrace?.(ev.azaad_trace);
     if (ev.azaad_sources) h.onSources?.(ev.azaad_sources);
+    if (ev.azaad_scope) h.onScope?.(ev.azaad_scope);
     const d = ev.choices?.[0]?.delta;
     if (d?.reasoning_content || d?.reasoning) h.onReasoning?.(d.reasoning_content ?? d.reasoning);
     if (d?.content) h.onToken?.(d.content);

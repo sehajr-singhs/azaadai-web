@@ -1,6 +1,6 @@
-# Azaad
+# AzaadAI
 
-The model of Bunga Azaadi (the Institute for Azadist Studies). Azaad is trained on the Institute's work, researches every question in the open, and cites each claim to its source.
+The model of Bunga Azaadi (the Institute for Azadist Studies). AzaadAI is trained on the Institute's work, researches every question in the open, and cites each claim to its source.
 
 **Site:** https://sehajr-singhs.github.io/azaadai-web/
 
@@ -8,14 +8,14 @@ The model of Bunga Azaadi (the Institute for Azadist Studies). Azaad is trained 
 
 | Piece | Where | What it does |
 | --- | --- | --- |
-| **Azaad** (public) | Gemma 4 31B + LoRA `azaad` | Trained on the four core papers: the Azadist Manifesto, *Khalistan vs Khalsa Raaj*, *The Khalsa Is The Guru* (the Khalsa Status series) and *The Dharam Yudh Pipeline*. Searches only those. |
-| **Azaad Research** (internal) | Gemma 4 31B + LoRA `azaad-research` | Trained on the whole Vichaar Repository. Needs an access code. Plans a wider search, checks its coverage for gaps, searches again, and writes at length. |
+| **AzaadAI** (public) | Gemma 4 31B + LoRA `azaad` | Trained on the four core papers: the Azadist Manifesto, *Khalistan vs Khalsa Raaj*, *The Khalsa Is The Guru* (the Khalsa Status series) and *The Dharam Yudh Pipeline*. Searches only those. |
+| **AzaadAI Research** (internal) | Gemma 4 31B + LoRA `azaad-research` | Trained on the whole Vichaar Repository. Needs an access code. Plans a wider search, checks its coverage for gaps, searches again, and writes at length. |
 | GPU | RunPod Serverless (vLLM, FP8) | Scales to zero. The first answer after a quiet spell waits for a worker to boot. |
 | Gateway | Modal (`server/azaad1.py`) | Holds the RunPod key and the access codes, indexes the library, runs the research loop, streams the trace. |
 | Site | GitHub Pages (`src/`) | The console, with the line of research, sources and Council. |
 | Terminal | `cli/azaad.py` | The same, in your shell. |
 
-## How Azaad was trained
+## How AzaadAI was trained
 
 1. **Library.** Every page of bungaazaadi.com plus the Dharam Yudh Pipeline whitepaper (PDF, with kerning repaired) is fetched and split into about 1,200 passages (`server/azaad_lib.py`).
 2. **Questions.** A teacher (Gemma 4 31B, thinking on) read each passage and wrote the questions real people ask: newcomers, skeptics, practitioners, serious students, comparisons, quizzes. That gave about 2,100 questions for the four papers and 1,700 for the rest of the repository (`train/gen_data.py questions`).
@@ -55,7 +55,7 @@ curl -N $AZAAD_URL/v1/chat/completions \
 | --- | --- |
 | `council: true` | Arm the Council |
 | `X-Azaad-Access: <code>` | Research tier (`mode: "public"` forces the public model) |
-| `GET /v1/library/search?q=` | The passages Azaad would read |
+| `GET /v1/library/search?q=` | The passages AzaadAI would read |
 | `GET /v1/status`, `POST /v1/warm` | Whether a GPU worker is up; start one |
 
 Limits: 40 messages per 10 minutes per IP on the public tier, 300 per code on research.

@@ -1,5 +1,5 @@
 // Bring your own model. The browser calls the provider directly with the
-// visitor's key; the Azaad gateway only supplies the library passages.
+// visitor's key; the AzaadAI gateway only supplies the library passages.
 
 import { errorText, sse, type ChatMsg } from "./api";
 
@@ -67,7 +67,7 @@ async function streamOpenAI(a: ByokArgs, base: string) {
   if (a.apiKey) headers.authorization = `Bearer ${a.apiKey}`;
   if (a.provider === "openrouter") {
     headers["HTTP-Referer"] = location.origin;
-    headers["X-Title"] = "Azaad";
+    headers["X-Title"] = "AzaadAI";
   }
   const resp = await fetch(`${base.replace(/\/$/, "")}/chat/completions`, {
     method: "POST",
