@@ -54,6 +54,11 @@ PUBLIC_MODEL = "azaad"            # LoRA trained on the four core papers
 RESEARCH_MODEL = "azaad-research"  # LoRA trained on the whole repository
 BASE_MODEL = "google/gemma-4-31B-it"  # used for planning steps
 
+# The prompts are re-read from the published site, so whoever edits prompts/*.md on
+# GitHub changes the model's instructions without redeploying this gateway.
+PROMPT_URL = "https://sehajr-singhs.github.io/azaadai-web/{name}.md"
+PROMPT_TTL = 600
+
 ALLOWED_ORIGINS = ["https://sehajr-singhs.github.io", "http://localhost:5173", "http://localhost:4173"]
 
 TIERS = {
@@ -170,6 +175,7 @@ class Gateway:
     def start(self):
         self.persona = Path("/prompts/azaad.md").read_text(encoding="utf-8")
         self.council = Path("/prompts/council.md").read_text(encoding="utf-8")
+        self.prompts_at = 0.0
         docs, fresh = L.load_docs(cache=LIBRARY_FILE)
         if fresh:
             library_cache.commit()
@@ -242,6 +248,19 @@ class Gateway:
                 await complete(PUBLIC_MODEL, [{"role": "user", "content": "Sat Sri Akaal"}], max_tokens=1)
             except Exception:  # noqa: BLE001
                 pass
+
+        async def refresh_prompts():
+            """Pick up prompt edits published to the site. Keeps the last good copy on any failure."""
+            if time.time() - self.prompts_at < PROMPT_TTL:
+                return
+            self.prompts_at = time.time()
+            for name, attr in (("azaad", "persona"), ("council", "council")):
+                try:
+                    r = await client.get(PROMPT_URL.format(name=name), timeout=8)
+                    if r.status_code == 200 and len(r.text) > 200 and "<html" not in r.text[:500].lower():
+                        setattr(self, attr, r.text)
+                except Exception as exc:  # noqa: BLE001
+                    print("prompt refresh failed", name, exc.__class__.__name__)
 
         def spawn(coro):
             t = asyncio.create_task(coro)
@@ -403,6 +422,7 @@ class Gateway:
 
             async def run():
                 t0 = time.time()
+                await refresh_prompts()
 
                 def ev(**kw):
                     return {"object": "chat.completion.chunk", "model": cfg["model"], "choices": [], **kw}
